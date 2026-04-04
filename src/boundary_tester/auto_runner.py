@@ -179,20 +179,25 @@ def validate_provider_constraints(config: AutoBoundaryRunnerConfig) -> None:
     hourly_interval = config.hourly_interval.strip().lower()
     if provider not in {"yfinance", "yahoo_finance", "yahoo"}:
         return
-    if hourly_interval != "1h":
+    if not _is_intraday_interval(hourly_interval):
         return
 
     start_date = pd.Timestamp(config.start_date).normalize()
     today = pd.Timestamp.utcnow().tz_localize(None).normalize()
-    approx_intraday_limit_start = today - pd.Timedelta(days=729)
+    intraday_limit_start = today - pd.Timedelta(days=60)
 
-    if start_date < approx_intraday_limit_start:
+    if start_date < intraday_limit_start:
         raise ValueError(
-            "Current config requests yfinance 1h data earlier than its typical intraday retention window. "
-            f"Configured start_date is {start_date.date()}, while an approximate safe lower bound from today "
-            f"({today.date()}) is {approx_intraday_limit_start.date()}. "
-            "For strict daily VP generation, shorten the research range or switch to a provider with deeper 1h history."
+            "Current config requests yfinance intraday data earlier than its documented retention window. "
+            f"Configured start_date is {start_date.date()}, while a conservative 60-day lower bound from today "
+            f"({today.date()}) is {intraday_limit_start.date()}. "
+            "For strict VP generation, shorten the research range or switch to a provider with deeper intraday history."
         )
+
+
+def _is_intraday_interval(interval: str) -> bool:
+    normalized = interval.strip().lower()
+    return normalized not in {"1d", "1w", "1wk", "1mo", "1mth", "1month", "1q", "1y"}
 
 
 def fetch_price_frame(

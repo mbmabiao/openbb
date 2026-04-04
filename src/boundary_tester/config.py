@@ -19,6 +19,8 @@ class BoundaryTesterConfig:
     atr_multiple_success: float = 1.5
     atr_window: int = 14
     retest_buffer_pct: float = 0.002
+    failed_breakout_reentry_depth_frac: float = 0.25
+    failed_breakout_min_consecutive_inside_bars: int = 2
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> "BoundaryTesterConfig":

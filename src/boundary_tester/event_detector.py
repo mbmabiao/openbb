@@ -27,6 +27,8 @@ def detect_boundary_events(price_df: pd.DataFrame, zone_df: pd.DataFrame, config
                 "boundary_price",
                 "close_distance_pct",
                 "bar_index",
+                "local_bar_index",
+                "global_bar_index",
                 "is_first_test",
                 "prior_test_count",
                 "zone_class",
@@ -47,10 +49,13 @@ def detect_boundary_events(price_df: pd.DataFrame, zone_df: pd.DataFrame, config
 
 def _detect_zone_events(price_df: pd.DataFrame, zone: pd.Series, config: BoundaryTesterConfig) -> list[dict]:
     ticker_prices = price_df[price_df["ticker"] == zone["ticker"]].copy() if "ticker" in price_df.columns else price_df.copy()
+    ticker_prices = ticker_prices.sort_values("timestamp", kind="stable").reset_index(drop=True)
+    ticker_prices["global_bar_index"] = ticker_prices.index.astype(int)
     ticker_prices = ticker_prices[ticker_prices["timestamp"] >= zone["valid_from"]].copy()
     if pd.notna(zone.get("valid_to")):
         ticker_prices = ticker_prices[ticker_prices["timestamp"] <= zone["valid_to"]].copy()
     ticker_prices = ticker_prices.reset_index(drop=True)
+    ticker_prices["local_bar_index"] = ticker_prices.index.astype(int)
 
     if ticker_prices.empty:
         return []
@@ -173,7 +178,7 @@ def _detect_post_breakout_events(
     events: list[dict] = []
 
     for breakout_event in breakout_events:
-        breakout_idx = int(breakout_event["bar_index"])
+        breakout_idx = int(breakout_event["local_bar_index"])
         future = price_df.iloc[
             breakout_idx + 1: breakout_idx + 1 + max(config.lookahead_bars, config.failure_reentry_bars)
         ].copy()
@@ -182,20 +187,30 @@ def _detect_post_breakout_events(
 
         failed_idx = None
         retest_idx = None
+        consecutive_inside = 0
 
         for offset, (_, row) in enumerate(future.iterrows(), start=1):
             close = float(row["close"])
             high = float(row["high"])
             low = float(row["low"])
+            inside_boundary = _is_inside_boundary(close=close, boundary=boundary, side=side)
+            deep_reentry = _is_deep_reentry(close=close, zone=zone, side=side, config=config)
+
+            if offset <= config.failure_reentry_bars:
+                consecutive_inside = consecutive_inside + 1 if inside_boundary else 0
+                if (
+                    failed_idx is None
+                    and (
+                        deep_reentry
+                        or consecutive_inside >= max(config.failed_breakout_min_consecutive_inside_bars, 1)
+                    )
+                ):
+                    failed_idx = breakout_idx + offset
 
             if side == "resistance":
-                if failed_idx is None and offset <= config.failure_reentry_bars and close <= boundary:
-                    failed_idx = breakout_idx + offset
                 if retest_idx is None and low <= boundary * (1.0 + retest_buffer) and close > boundary:
                     retest_idx = breakout_idx + offset
             else:
-                if failed_idx is None and offset <= config.failure_reentry_bars and close >= boundary:
-                    failed_idx = breakout_idx + offset
                 if retest_idx is None and high >= boundary * (1.0 - retest_buffer) and close < boundary:
                     retest_idx = breakout_idx + offset
 
@@ -213,6 +228,31 @@ def _detect_post_breakout_events(
             events.append(_build_event_dict(price_df, zone, retest_row, retest_idx, event_type, breakout_event["prior_test_count"] + 1))
 
     return events
+
+
+def _is_inside_boundary(close: float, boundary: float, side: str) -> bool:
+    if side == "resistance":
+        return close <= boundary
+    return close >= boundary
+
+
+def _is_deep_reentry(
+    close: float,
+    zone: pd.Series,
+    side: str,
+    config: BoundaryTesterConfig,
+) -> bool:
+    zone_width = max(float(zone["upper"]) - float(zone["lower"]), 0.0)
+    depth_frac = max(float(config.failed_breakout_reentry_depth_frac), 0.0)
+    if zone_width <= 0:
+        return False
+
+    if side == "resistance":
+        threshold = float(zone["upper"]) - zone_width * depth_frac
+        return close <= threshold
+
+    threshold = float(zone["lower"]) + zone_width * depth_frac
+    return close >= threshold
 
 
 def _build_event_dict(
@@ -245,7 +285,9 @@ def _build_event_dict(
         "price_at_event": close,
         "boundary_price": boundary,
         "close_distance_pct": (close - boundary) / max(abs(boundary), 1e-9),
-        "bar_index": int(idx),
+        "bar_index": int(row.get("global_bar_index", idx)),
+        "local_bar_index": int(row.get("local_bar_index", idx)),
+        "global_bar_index": int(row.get("global_bar_index", idx)),
         "is_first_test": bool(prior_test_count == 0),
         "prior_test_count": int(prior_test_count),
         "zone_class": zone["zone_class"],
