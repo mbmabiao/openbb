@@ -570,56 +570,6 @@ def find_anchor_points(df: pd.DataFrame, recent_window_cap: int = 126) -> dict[s
     return cleaned
 
 
-def build_volume_profile_zones(
-    df: pd.DataFrame,
-    lookback: int,
-    bins: int,
-    zone_expand: float,
-    hv_quantile: float,
-    timeframe: str,
-) -> tuple[list[dict], pd.DataFrame]:
-    if df.empty:
-        return [], pd.DataFrame()
-
-    sub = df.tail(lookback).copy()
-    if sub.empty:
-        return [], pd.DataFrame()
-
-    low_min = float(sub["low"].min())
-    high_max = float(sub["high"].max())
-    if not np.isfinite(low_min) or not np.isfinite(high_max) or high_max <= low_min:
-        return [], pd.DataFrame()
-
-    bin_edges = np.linspace(low_min, high_max, bins + 1)
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
-    vol_bins = np.zeros(bins)
-
-    typical_price = (sub["high"] + sub["low"] + sub["close"]) / 3.0
-    volumes = sub["volume"].fillna(0.0).values
-
-    idxs = np.digitize(typical_price.values, bin_edges) - 1
-    idxs = np.clip(idxs, 0, bins - 1)
-
-    for i, vol in zip(idxs, volumes):
-        vol_bins[i] += vol
-
-    vp_df = pd.DataFrame({
-        "bin_left": bin_edges[:-1],
-        "bin_right": bin_edges[1:],
-        "bin_center": bin_centers,
-        "volume": vol_bins,
-        "timeframe": timeframe,
-    })
-
-    return build_vp_zones_from_profile(
-        vp_df=vp_df,
-        zone_expand=zone_expand,
-        hv_quantile=hv_quantile,
-        timeframe=timeframe,
-        source_label=f"VP ({timeframe})",
-    )
-
-
 def build_vp_zones_from_profile(
     vp_df: pd.DataFrame,
     zone_expand: float,
