@@ -33,7 +33,7 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Institutional Zone Settings")
 
 vp_lookback_days = st.sidebar.slider(
-    "Composite 5m VP lookback days",
+    "Composite VP lookback days",
     min_value=5,
     max_value=120,
     value=30,
@@ -316,11 +316,11 @@ def get_recent_trading_dates_for_weekly_window(
     return [pd.Timestamp(d).normalize() for d in selected]
 
 
-def fetch_intraday_history_for_dates(
+def fetch_interval_history_for_dates(
     symbol_value: str,
     trading_dates: list[pd.Timestamp],
     provider_value: str | None,
-    interval_value: str = "5m",
+    interval_value: str,
 ) -> pd.DataFrame:
     if not trading_dates:
         return pd.DataFrame()
@@ -335,29 +335,29 @@ def fetch_intraday_history_for_dates(
         end_date_value=str(query_end_ts.date()),
         provider_value=provider_value,
         interval_value=interval_value,
-        adjustment_value="unadjusted",
+        adjustment_value="splits_only",
         extended_hours_value=False,
     )
-    intraday_df = to_dataframe(result)
-    if intraday_df is None or intraday_df.empty:
+    interval_df = to_dataframe(result)
+    if interval_df is None or interval_df.empty:
         return pd.DataFrame()
 
-    intraday_df = normalise_ohlcv_columns(intraday_df)
+    interval_df = normalise_ohlcv_columns(interval_df)
     required_cols = {"date", "open", "high", "low", "close", "volume"}
-    if not required_cols.issubset(set(intraday_df.columns)):
+    if not required_cols.issubset(set(interval_df.columns)):
         return pd.DataFrame()
 
     for col in ["open", "high", "low", "close", "volume"]:
-        intraday_df[col] = pd.to_numeric(intraday_df[col], errors="coerce")
+        interval_df[col] = pd.to_numeric(interval_df[col], errors="coerce")
 
-    intraday_df = intraday_df.dropna(subset=["date", "open", "high", "low", "close", "volume"]).copy()
-    if intraday_df.empty:
+    interval_df = interval_df.dropna(subset=["date", "open", "high", "low", "close", "volume"]).copy()
+    if interval_df.empty:
         return pd.DataFrame()
 
     target_dates = {pd.Timestamp(d).normalize() for d in trading_dates}
-    intraday_dates = pd.to_datetime(intraday_df["date"]).dt.normalize()
-    intraday_df = intraday_df.loc[intraday_dates.isin(target_dates)].copy().reset_index(drop=True)
-    return intraday_df
+    interval_dates = pd.to_datetime(interval_df["date"]).dt.normalize()
+    interval_df = interval_df.loc[interval_dates.isin(target_dates)].copy().reset_index(drop=True)
+    return interval_df
 
 
 def prepare_plot_and_calc_frames(
@@ -641,19 +641,19 @@ def build_vp_zones_from_profile(
     return zones, vp_df
 
 
-def build_composite_intraday_volume_profile_zones(
-    intraday_df: pd.DataFrame,
+def build_composite_interval_volume_profile_zones(
+    interval_df: pd.DataFrame,
     bins: int,
     zone_expand: float,
     hv_quantile: float,
     timeframe: str,
     source_label: str | None = None,
-    source_mode: str = "5m_composite",
+    source_mode: str = "composite",
 ) -> tuple[list[dict], pd.DataFrame]:
-    if intraday_df.empty:
+    if interval_df.empty:
         return [], pd.DataFrame()
 
-    sub = intraday_df.copy()
+    sub = interval_df.copy()
     low_min = float(sub["low"].min())
     high_max = float(sub["high"].max())
     if not np.isfinite(low_min) or not np.isfinite(high_max):
@@ -716,7 +716,7 @@ def build_composite_intraday_volume_profile_zones(
         zone_expand=zone_expand,
         hv_quantile=hv_quantile,
         timeframe=timeframe,
-        source_label=source_label or f"VP ({timeframe}, 5m composite)",
+        source_label=source_label or f"VP ({timeframe}, composite)",
     )
 
 
@@ -1158,10 +1158,10 @@ def show_definitions():
 **这版新增了多周期共振、历史反应验证与复盘模式。**
 
 **1) Daily and Weekly Zones / 日线与周线区域**
-- Composite VP input: recent **{vp_lookback_days}** trading days of **5m OHLCV**
-- Composite VP method: each 5m bar distributes volume across all covered price bins
-- Higher-timeframe VP input: recent **{weekly_vp_lookback}** weekly windows of **5m OHLCV**
-- No fallback to lower-precision daily/weekly bar VP when 5m data is unavailable
+- Daily VP input: recent **{vp_lookback_days}** trading days of **1h OHLCV**
+- Higher-timeframe VP input: recent **{weekly_vp_lookback}** weekly windows of **1d OHLCV**
+- Composite VP method: each source bar distributes volume across all covered price bins
+- No fallback to lower-precision VP when the required source interval is unavailable
 - Each zone explicitly records timeframe source(s)
 
 **2) Multi-timeframe confluence / 多周期共振**
@@ -1680,59 +1680,61 @@ def show_price_chart():
         current_price = float(df_calc_daily["close"].iloc[-1])
 
         df_calc_daily_with_features, daily_anchor_meta = build_avwap_features(df_calc_daily, timeframe="D")
-        vp_daily_mode = "5m composite"
-        vp_daily_note = f"Daily VP uses the most recent {vp_lookback_days} trading days of 5m OHLCV."
+        vp_daily_mode = "1h composite"
+        vp_daily_note = f"Daily VP uses the most recent {vp_lookback_days} trading days of 1h OHLCV."
         recent_vp_dates = get_recent_trading_dates(df_calc_daily, vp_lookback_days)
-        intraday_vp_df = pd.DataFrame()
+        daily_vp_source_df = pd.DataFrame()
         daily_vp_zones_raw = []
         vp_df_daily = pd.DataFrame()
 
         try:
-            intraday_vp_df = fetch_intraday_history_for_dates(
+            daily_vp_source_df = fetch_interval_history_for_dates(
                 symbol_value=symbol,
                 trading_dates=recent_vp_dates,
                 provider_value=price_provider,
-                interval_value="5m",
+                interval_value="1h",
             )
-        except Exception as intraday_error:
-            vp_daily_mode = "5m unavailable"
+        except Exception as interval_error:
+            vp_daily_mode = "1h unavailable"
             vp_daily_note = (
-                "5m history could not be loaded for the selected replay window, "
-                f"so daily VP was omitted. Details: {intraday_error}"
+                "1h history could not be loaded for the selected replay window, "
+                f"so daily VP was omitted. Details: {interval_error}"
             )
 
-        if not intraday_vp_df.empty:
+        if not daily_vp_source_df.empty:
             try:
-                daily_vp_zones_raw, vp_df_daily = build_composite_intraday_volume_profile_zones(
-                    intraday_df=intraday_vp_df,
+                daily_vp_zones_raw, vp_df_daily = build_composite_interval_volume_profile_zones(
+                    interval_df=daily_vp_source_df,
                     bins=vp_bins,
                     zone_expand=zone_expand_pct,
                     hv_quantile=hv_node_quantile,
                     timeframe="D",
+                    source_label="VP (D, 1h composite)",
+                    source_mode="1h_composite",
                 )
-            except Exception as intraday_profile_error:
+            except Exception as interval_profile_error:
                 daily_vp_zones_raw, vp_df_daily = [], pd.DataFrame()
-                vp_daily_mode = "5m unavailable"
+                vp_daily_mode = "1h unavailable"
                 vp_daily_note = (
-                    "5m composite daily VP construction failed for the selected replay window, "
-                    f"so daily VP was omitted. Details: {intraday_profile_error}"
+                    "1h composite daily VP construction failed for the selected replay window, "
+                    f"so daily VP was omitted. Details: {interval_profile_error}"
                 )
             else:
                 if not vp_df_daily.empty:
                     vp_daily_note = (
-                        f"Daily VP uses {len(recent_vp_dates)} trading days / {len(intraday_vp_df)} bars of 5m OHLCV."
+                        f"Daily VP uses {len(recent_vp_dates)} trading days / {len(daily_vp_source_df)} bars of 1h OHLCV."
                     )
                 else:
-                    vp_daily_mode = "5m unavailable"
+                    vp_daily_mode = "1h unavailable"
                     vp_daily_note = (
-                        "5m history was returned, but no valid composite daily VP could be built, "
+                        "1h history was returned, but no valid composite daily VP could be built, "
                         "so daily VP was omitted."
                     )
         else:
-            if vp_daily_mode != "5m unavailable":
-                vp_daily_mode = "5m unavailable"
+            if vp_daily_mode != "1h unavailable":
+                vp_daily_mode = "1h unavailable"
                 vp_daily_note = (
-                    "No 5m history was returned for the selected replay window, "
+                    "No 1h history was returned for the selected replay window, "
                     "so daily VP was omitted."
                 )
         daily_vp_zones = create_candidate_zones_from_vp(df_calc_daily_with_features, daily_vp_zones_raw)
@@ -1744,65 +1746,65 @@ def show_price_chart():
 
         df_calc_weekly = resample_to_weekly(df_calc_daily)
         df_calc_weekly_with_features, weekly_anchor_meta = build_avwap_features(df_calc_weekly, timeframe="W")
-        vp_weekly_mode = "5m higher-timeframe composite"
+        vp_weekly_mode = "1d higher-timeframe composite"
         vp_weekly_note = (
-            f"Weekly VP uses the most recent {weekly_vp_lookback} weekly windows of 5m OHLCV."
+            f"Weekly VP uses the most recent {weekly_vp_lookback} weekly windows of 1d OHLCV."
         )
         recent_weekly_vp_dates = get_recent_trading_dates_for_weekly_window(df_calc_daily, weekly_vp_lookback)
-        intraday_weekly_vp_df = pd.DataFrame()
+        weekly_vp_source_df = pd.DataFrame()
         weekly_vp_zones_raw = []
         vp_df_weekly = pd.DataFrame()
 
         try:
-            intraday_weekly_vp_df = fetch_intraday_history_for_dates(
+            weekly_vp_source_df = fetch_interval_history_for_dates(
                 symbol_value=symbol,
                 trading_dates=recent_weekly_vp_dates,
                 provider_value=price_provider,
-                interval_value="5m",
+                interval_value="1d",
             )
-        except Exception as intraday_error:
-            vp_weekly_mode = "5m unavailable"
+        except Exception as interval_error:
+            vp_weekly_mode = "1d unavailable"
             vp_weekly_note = (
-                "5m higher-timeframe history could not be loaded for the selected replay window, "
-                f"so higher-timeframe VP was omitted. Details: {intraday_error}"
+                "1d higher-timeframe history could not be loaded for the selected replay window, "
+                f"so higher-timeframe VP was omitted. Details: {interval_error}"
             )
 
-        if not intraday_weekly_vp_df.empty:
+        if not weekly_vp_source_df.empty:
             try:
-                weekly_vp_zones_raw, vp_df_weekly = build_composite_intraday_volume_profile_zones(
-                    intraday_df=intraday_weekly_vp_df,
+                weekly_vp_zones_raw, vp_df_weekly = build_composite_interval_volume_profile_zones(
+                    interval_df=weekly_vp_source_df,
                     bins=weekly_vp_bins,
                     zone_expand=zone_expand_pct,
                     hv_quantile=hv_node_quantile,
                     timeframe="W",
-                    source_label="VP (W, 5m higher-timeframe composite)",
-                    source_mode="5m_higher_timeframe_composite",
+                    source_label="VP (W, 1d higher-timeframe composite)",
+                    source_mode="1d_higher_timeframe_composite",
                 )
-            except Exception as intraday_profile_error:
+            except Exception as interval_profile_error:
                 weekly_vp_zones_raw, vp_df_weekly = [], pd.DataFrame()
-                vp_weekly_mode = "5m unavailable"
+                vp_weekly_mode = "1d unavailable"
                 vp_weekly_note = (
-                    "5m higher-timeframe VP construction failed for the selected replay window, "
-                    f"so higher-timeframe VP was omitted. Details: {intraday_profile_error}"
+                    "1d higher-timeframe VP construction failed for the selected replay window, "
+                    f"so higher-timeframe VP was omitted. Details: {interval_profile_error}"
                 )
             else:
                 if not vp_df_weekly.empty:
                     vp_weekly_note = (
                         f"Weekly VP uses {len(recent_weekly_vp_dates)} trading days / "
-                        f"{len(intraday_weekly_vp_df)} bars of 5m OHLCV."
+                        f"{len(weekly_vp_source_df)} bars of 1d OHLCV."
                     )
                 else:
-                    vp_weekly_mode = "5m unavailable"
+                    vp_weekly_mode = "1d unavailable"
                     vp_weekly_note = (
-                        "5m higher-timeframe history was returned, but no valid composite VP could be built, "
+                        "1d higher-timeframe history was returned, but no valid composite VP could be built, "
                         "so higher-timeframe VP was omitted."
                     )
 
-        if intraday_weekly_vp_df.empty:
-            if vp_weekly_mode != "5m unavailable":
-                vp_weekly_mode = "5m unavailable"
+        if weekly_vp_source_df.empty:
+            if vp_weekly_mode != "1d unavailable":
+                vp_weekly_mode = "1d unavailable"
                 vp_weekly_note = (
-                    "No 5m higher-timeframe history was returned for the selected replay window, "
+                    "No 1d higher-timeframe history was returned for the selected replay window, "
                     "so higher-timeframe VP was omitted."
                 )
         weekly_vp_zones = create_candidate_zones_from_vp(df_calc_weekly_with_features, weekly_vp_zones_raw)
