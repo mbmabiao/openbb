@@ -1,0 +1,46 @@
+{
+  "adjustment": "splits_only",
+  "boundary_tester": {
+    "atr_multiple_success": 1.5,
+    "atr_window": 14,
+    "breakout_buffer_pct": 0.002,
+    "failure_reentry_bars": 5,
+    "lookahead_bars": 20,
+    "max_event_gap": 3,
+    "min_close_outside_zone": 2,
+    "probe_buffer_pct": 0.001,
+    "retest_buffer_pct": 0.002,
+    "success_move_pct": 0.03,
+    "use_atr_filter": false
+  },
+  "daily_interval": "1d",
+  "end_date": "2026-01-01",
+  "extended_hours": false,
+  "hourly_interval": "1h",
+  "output_dir": "outputs/boundary_tester",
+  "price_provider": "yfinance",
+  "start_date": "2025-01-01",
+  "tickers": [
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "JPM"
+  ],
+  "zone_engine": {
+    "daily_vp_bins": 48,
+    "daily_vp_lookback_days": 30,
+    "hv_node_quantile_pct": 75,
+    "max_resistance_zones": 3,
+    "max_support_zones": 3,
+    "merge_pct_bp": 60,
+    "min_history_bars": 90,
+    "min_touch_gap": 3,
+    "reaction_lookahead_bars": 5,
+    "reaction_threshold_bp": 150,
+    "weekly_vp_bins": 24,
+    "weekly_vp_lookback_weeks": 26,
+    "zone_expand_bp": 50,
+    "zone_refresh_every_n_bars": 5
+  }
+}

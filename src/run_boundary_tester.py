@@ -1,45 +1,37 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
-import pandas as pd
-
-from boundary_tester import BoundaryTesterConfig, run_boundary_tester
+from boundary_tester import run_auto_boundary_tester
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Boundary Tester pipeline.")
-    parser.add_argument("--prices", required=True, help="Path to prices CSV.")
-    parser.add_argument("--zones", required=True, help="Path to zones CSV.")
-    parser.add_argument("--output", required=True, help="Output directory.")
-    parser.add_argument("--config", help="Optional JSON config file.")
+    parser = argparse.ArgumentParser(description="Run the automated Boundary Tester pipeline from YAML.")
+    parser.add_argument("--config", required=True, help="Path to YAML config.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    config = BoundaryTesterConfig.from_json_file(args.config) if args.config else BoundaryTesterConfig()
+    config_path = Path(args.config)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file does not exist: {config_path}")
+    if not config_path.is_file():
+        raise ValueError(f"Config path is not a file: {config_path}")
 
-    prices_df = pd.read_csv(args.prices)
-    zones_df = pd.read_csv(args.zones)
-
-    result = run_boundary_tester(
-        price_df=prices_df,
-        zone_df=zones_df,
-        config=config,
-        output_dir=args.output,
-    )
+    result = run_auto_boundary_tester(config_path)
 
     print("Boundary Tester completed.")
     print(f"Events: {len(result['events'])}")
     print(f"Labeled events: {len(result['labeled_events'])}")
+    print(f"Generated zones: {len(result['generated_zones'])}")
     print("Summary:")
     print(result["summary"].to_string(index=False))
-    print(f"Output directory: {Path(args.output).resolve()}")
-    print("Config snapshot:")
-    print(json.dumps(config.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
+    print(f"Output directory: {Path(result['report_path']).resolve().parent}")
+    print(f"Generated zones file: {Path(result['generated_zones_path']).resolve()}")
+    print(f"Validation prices file: {Path(result['validation_prices_path']).resolve()}")
+    print(f"Config snapshot: {Path(result['config_snapshot_path']).resolve()}")
 
 
 if __name__ == "__main__":
