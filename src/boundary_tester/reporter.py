@@ -117,8 +117,7 @@ def write_report(
         "```",
     ]
 
-    report_path.write_text("\n".join(lines), encoding="utf-8")
-    return report_path
+    return _safe_write_report(report_path, "\n".join(lines))
 
 
 def _group_summary_json(df: pd.DataFrame, column: str) -> str:
@@ -177,3 +176,18 @@ def _best_bucket(raw_json: str | None) -> str:
         return "N/A"
     best_key = max(payload, key=lambda key: payload[key].get("success_rate", float("-inf")))
     return best_key
+
+
+def _safe_write_report(path: Path, content: str) -> Path:
+    try:
+        path.write_text(content, encoding="utf-8")
+        return path
+    except PermissionError:
+        fallback_path = _build_locked_file_fallback_path(path)
+        fallback_path.write_text(content, encoding="utf-8")
+        return fallback_path
+
+
+def _build_locked_file_fallback_path(path: Path) -> Path:
+    timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+    return path.with_name(f"{path.stem}.{timestamp}{path.suffix}")

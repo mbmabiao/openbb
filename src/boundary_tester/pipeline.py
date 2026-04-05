@@ -40,9 +40,9 @@ def run_boundary_tester(
         labeled_path = output_path / "labeled_events.csv"
         summary_path = output_path / "summary.csv"
 
-        events_df.to_csv(events_path, index=False, encoding="utf-8-sig")
-        labeled_events_df.to_csv(labeled_path, index=False, encoding="utf-8-sig")
-        summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
+        events_path = _safe_write_csv(events_df, events_path)
+        labeled_path = _safe_write_csv(labeled_events_df, labeled_path)
+        summary_path = _safe_write_csv(summary_df, summary_path)
         report_path = write_report(output_path, events_df, labeled_events_df, summary_df, config)
 
         result.update(
@@ -55,3 +55,20 @@ def run_boundary_tester(
         )
 
     return result
+
+
+def _safe_write_csv(df: pd.DataFrame, path: Path) -> Path:
+    try:
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+        return path
+    except PermissionError:
+        fallback_path = _build_locked_file_fallback_path(path)
+        df.to_csv(fallback_path, index=False, encoding="utf-8-sig")
+        return fallback_path
+
+
+def _build_locked_file_fallback_path(path: Path) -> Path:
+    timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+    stem = path.stem
+    suffix = path.suffix or ".csv"
+    return path.with_name(f"{stem}.{timestamp}{suffix}")

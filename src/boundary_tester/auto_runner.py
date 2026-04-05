@@ -45,7 +45,8 @@ class AutoBoundaryRunnerConfig:
 
     @classmethod
     def from_yaml_file(cls, path: str | Path) -> "AutoBoundaryRunnerConfig":
-        payload = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        config_path = Path(path).resolve()
+        payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         universe = payload.get("universe", {})
         data = payload.get("data", {})
         output = payload.get("output", {})
@@ -62,12 +63,15 @@ class AutoBoundaryRunnerConfig:
         output_dir = str(output.get("dir", "")).strip()
         if not output_dir:
             raise ValueError("YAML config must provide output.dir.")
+        output_dir_path = Path(output_dir)
+        if not output_dir_path.is_absolute():
+            output_dir_path = (config_path.parent / output_dir_path).resolve()
 
         return cls(
             tickers=tickers,
             start_date=start_date,
             end_date=end_date,
-            output_dir=output_dir,
+            output_dir=str(output_dir_path),
             price_provider=(str(data.get("price_provider")).strip() or None) if data.get("price_provider") is not None else None,
             hourly_interval=str(data.get("hourly_interval", "1h")).strip(),
             daily_interval=str(data.get("daily_interval", "1d")).strip(),
@@ -147,8 +151,8 @@ def run_auto_boundary_tester(config_path: str | Path) -> dict[str, Any]:
 
     zones_path = output_dir / "generated_zones.csv"
     prices_path = output_dir / "validation_prices.csv"
-    zones_df.to_csv(zones_path, index=False, encoding="utf-8-sig")
-    prices_df.to_csv(prices_path, index=False, encoding="utf-8-sig")
+    zones_path = _safe_write_csv(zones_df, zones_path)
+    prices_path = _safe_write_csv(prices_df, prices_path)
 
     pipeline_result = run_boundary_tester(
         price_df=prices_df,
@@ -158,9 +162,9 @@ def run_auto_boundary_tester(config_path: str | Path) -> dict[str, Any]:
     )
 
     config_snapshot_path = output_dir / "run_config.json"
-    config_snapshot_path.write_text(
+    config_snapshot_path = _safe_write_text(
+        config_snapshot_path,
         json.dumps(config.to_dict(), ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
     )
 
     pipeline_result.update(
@@ -175,23 +179,11 @@ def run_auto_boundary_tester(config_path: str | Path) -> dict[str, Any]:
 
 
 def validate_provider_constraints(config: AutoBoundaryRunnerConfig) -> None:
-    provider = (config.price_provider or "").strip().lower()
-    hourly_interval = config.hourly_interval.strip().lower()
-    if provider not in {"yfinance", "yahoo_finance", "yahoo"}:
-        return
-    if not _is_intraday_interval(hourly_interval):
-        return
-
     start_date = pd.Timestamp(config.start_date).normalize()
-    today = pd.Timestamp.utcnow().tz_localize(None).normalize()
-    intraday_limit_start = today - pd.Timedelta(days=60)
-
-    if start_date < intraday_limit_start:
+    end_date = pd.Timestamp(config.end_date).normalize()
+    if end_date < start_date:
         raise ValueError(
-            "Current config requests yfinance intraday data earlier than its documented retention window. "
-            f"Configured start_date is {start_date.date()}, while a conservative 60-day lower bound from today "
-            f"({today.date()}) is {intraday_limit_start.date()}. "
-            "For strict VP generation, shorten the research range or switch to a provider with deeper intraday history."
+            f"Invalid config date range: start_date {start_date.date()} is after end_date {end_date.date()}."
         )
 
 
@@ -200,7 +192,67 @@ def _is_intraday_interval(interval: str) -> bool:
     return normalized not in {"1d", "1w", "1wk", "1mo", "1mth", "1month", "1q", "1y"}
 
 
+def _safe_write_csv(df: pd.DataFrame, path: Path) -> Path:
+    try:
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+        return path
+    except PermissionError:
+        fallback_path = _build_locked_file_fallback_path(path)
+        df.to_csv(fallback_path, index=False, encoding="utf-8-sig")
+        return fallback_path
+
+
+def _safe_write_text(path: Path, content: str) -> Path:
+    try:
+        path.write_text(content, encoding="utf-8")
+        return path
+    except PermissionError:
+        fallback_path = _build_locked_file_fallback_path(path)
+        fallback_path.write_text(content, encoding="utf-8")
+        return fallback_path
+
+
+def _build_locked_file_fallback_path(path: Path) -> Path:
+    timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+    return path.with_name(f"{path.stem}.{timestamp}{path.suffix}")
+
+
 def fetch_price_frame(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    provider: str | None,
+    interval: str,
+    adjustment: str,
+    extended_hours: bool,
+) -> pd.DataFrame:
+    start_ts = pd.Timestamp(start_date).normalize()
+    end_ts = pd.Timestamp(end_date).normalize()
+    provider_label = (provider or "").strip().lower()
+
+    if _should_chunk_intraday_requests(provider_label, interval, start_ts, end_ts):
+        return _fetch_chunked_intraday_price_frame(
+            symbol=symbol,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            provider=provider,
+            interval=interval,
+            adjustment=adjustment,
+            extended_hours=extended_hours,
+        )
+
+    return _fetch_single_price_frame(
+        symbol=symbol,
+        start_date=start_date,
+        end_date=end_date,
+        provider=provider,
+        interval=interval,
+        adjustment=adjustment,
+        extended_hours=extended_hours,
+    )
+
+
+def _fetch_single_price_frame(
     symbol: str,
     start_date: str,
     end_date: str,
@@ -237,6 +289,76 @@ def fetch_price_frame(
     if out.empty:
         raise ValueError(f"Price data for {symbol} at interval {interval} became empty after cleaning.")
     return out
+
+
+def _fetch_chunked_intraday_price_frame(
+    symbol: str,
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    provider: str | None,
+    interval: str,
+    adjustment: str,
+    extended_hours: bool,
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    chunk_windows = _build_intraday_request_windows(start_ts, end_ts, max_days_per_request=60)
+
+    for chunk_start, chunk_end in chunk_windows:
+        frame = _fetch_single_price_frame(
+            symbol=symbol,
+            start_date=str(chunk_start.date()),
+            end_date=str(chunk_end.date()),
+            provider=provider,
+            interval=interval,
+            adjustment=adjustment,
+            extended_hours=extended_hours,
+        )
+        frames.append(frame)
+
+    if not frames:
+        raise ValueError(f"No chunked price data could be fetched for {symbol} at interval {interval}.")
+
+    out = pd.concat(frames, ignore_index=True)
+    out = out.drop_duplicates(subset=["date"], keep="last").sort_values("date", kind="stable").reset_index(drop=True)
+    if out.empty:
+        raise ValueError(f"Chunked price data for {symbol} at interval {interval} became empty after deduplication.")
+    return out
+
+
+def _build_intraday_request_windows(
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    max_days_per_request: int,
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    if end_ts < start_ts:
+        return []
+
+    max_days_per_request = max(int(max_days_per_request), 1)
+    chunk_span = pd.Timedelta(days=max_days_per_request - 1)
+    windows: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    current_start = start_ts
+
+    while current_start <= end_ts:
+        current_end = min(current_start + chunk_span, end_ts)
+        windows.append((current_start, current_end))
+        if current_end >= end_ts:
+            break
+        current_start = current_end
+
+    return windows
+
+
+def _should_chunk_intraday_requests(
+    provider: str,
+    interval: str,
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+) -> bool:
+    if provider not in {"yfinance", "yahoo_finance", "yahoo"}:
+        return False
+    if not _is_intraday_interval(interval):
+        return False
+    return (end_ts - start_ts).days + 1 > 60
 
 
 def validate_source_coverage_for_ticker(
