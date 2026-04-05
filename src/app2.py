@@ -32,13 +32,7 @@ news_limit = st.sidebar.slider("News items", min_value=5, max_value=50, value=10
 st.sidebar.markdown("---")
 st.sidebar.subheader("Institutional Zone Settings")
 
-vp_lookback_days = st.sidebar.slider(
-    "Composite VP lookback days",
-    min_value=5,
-    max_value=120,
-    value=30,
-    step=5,
-)
+vp_lookback_days = 20
 
 vp_bins = st.sidebar.slider(
     "Composite VP price bins",

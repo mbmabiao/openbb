@@ -228,9 +228,8 @@ def fetch_price_frame(
 ) -> pd.DataFrame:
     start_ts = pd.Timestamp(start_date).normalize()
     end_ts = pd.Timestamp(end_date).normalize()
-    provider_label = (provider or "").strip().lower()
 
-    if _should_chunk_intraday_requests(provider_label, interval, start_ts, end_ts):
+    if _should_chunk_intraday_requests(interval):
         return _fetch_chunked_intraday_price_frame(
             symbol=symbol,
             start_ts=start_ts,
@@ -304,15 +303,27 @@ def _fetch_chunked_intraday_price_frame(
     chunk_windows = _build_intraday_request_windows(start_ts, end_ts, max_days_per_request=60)
 
     for chunk_start, chunk_end in chunk_windows:
-        frame = _fetch_single_price_frame(
-            symbol=symbol,
-            start_date=str(chunk_start.date()),
-            end_date=str(chunk_end.date()),
-            provider=provider,
-            interval=interval,
-            adjustment=adjustment,
-            extended_hours=extended_hours,
-        )
+        try:
+            frame = _fetch_single_price_frame(
+                symbol=symbol,
+                start_date=str(chunk_start.date()),
+                end_date=str((chunk_end + pd.Timedelta(days=1)).date()),
+                provider=provider,
+                interval=interval,
+                adjustment=adjustment,
+                extended_hours=extended_hours,
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"Intraday chunk fetch failed for {symbol} at interval {interval} "
+                f"for window {chunk_start.date()} to {chunk_end.date()}."
+            ) from exc
+        frame = _filter_frame_to_date_window(frame, chunk_start=chunk_start, chunk_end=chunk_end)
+        if frame.empty:
+            raise ValueError(
+                f"Intraday chunk for {symbol} at interval {interval} returned no usable rows "
+                f"after window filtering for {chunk_start.date()} to {chunk_end.date()}."
+            )
         frames.append(frame)
 
     if not frames:
@@ -343,22 +354,28 @@ def _build_intraday_request_windows(
         windows.append((current_start, current_end))
         if current_end >= end_ts:
             break
-        current_start = current_end
+        current_start = current_end + pd.Timedelta(days=1)
 
     return windows
 
 
 def _should_chunk_intraday_requests(
-    provider: str,
     interval: str,
-    start_ts: pd.Timestamp,
-    end_ts: pd.Timestamp,
 ) -> bool:
-    if provider not in {"yfinance", "yahoo_finance", "yahoo"}:
-        return False
-    if not _is_intraday_interval(interval):
-        return False
-    return (end_ts - start_ts).days + 1 > 60
+    return _is_intraday_interval(interval)
+
+
+def _filter_frame_to_date_window(
+    df: pd.DataFrame,
+    chunk_start: pd.Timestamp,
+    chunk_end: pd.Timestamp,
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    dates = pd.to_datetime(df["date"]).dt.normalize()
+    mask = (dates >= chunk_start.normalize()) & (dates <= chunk_end.normalize())
+    return df.loc[mask].copy().reset_index(drop=True)
 
 
 def validate_source_coverage_for_ticker(
