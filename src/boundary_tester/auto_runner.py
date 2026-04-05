@@ -7,10 +7,10 @@ from typing import Any
 
 import pandas as pd
 import yaml
-from openbb import obb
 
 from .config import BoundaryTesterConfig
 from .pipeline import run_boundary_tester
+from .price_fetcher import fetch_interval_history_for_dates, fetch_price_frame
 from .zone_engine import (
     ZoneEngineConfig,
     build_avwap_features,
@@ -22,10 +22,8 @@ from .zone_engine import (
     get_recent_trading_dates,
     get_recent_trading_dates_for_weekly_window,
     merge_close_zones,
-    normalise_ohlcv_columns,
     rank_zones_for_side,
     resample_to_weekly,
-    to_dataframe,
 )
 
 
@@ -116,19 +114,26 @@ def run_auto_boundary_tester(config_path: str | Path) -> dict[str, Any]:
             adjustment=config.adjustment,
             extended_hours=config.extended_hours,
         )
-        hourly_prices = fetch_price_frame(
+        snapshot_indices, required_intraday_dates, required_weekly_dates = collect_zone_required_dates(
+            daily_df=daily_prices,
+            zone_config=config.zone_engine,
+        )
+        intraday_prices = fetch_interval_history_for_dates(
             symbol=ticker,
-            start_date=config.start_date,
-            end_date=config.end_date,
-            provider=config.price_provider,
             interval=config.hourly_interval,
+            needed_trading_dates=required_intraday_dates,
+            trading_calendar_dates=pd.to_datetime(daily_prices["date"]).dt.normalize().tolist(),
+            provider=config.price_provider,
             adjustment=config.adjustment,
             extended_hours=config.extended_hours,
+            max_span_days=59,
         )
         validate_source_coverage_for_ticker(
             ticker=ticker,
             daily_df=daily_prices,
-            hourly_df=hourly_prices,
+            intraday_df=intraday_prices,
+            required_intraday_dates=required_intraday_dates,
+            required_weekly_dates=required_weekly_dates,
             zone_config=config.zone_engine,
             hourly_interval=config.hourly_interval,
             daily_interval=config.daily_interval,
@@ -138,7 +143,8 @@ def run_auto_boundary_tester(config_path: str | Path) -> dict[str, Any]:
         generated_zones = generate_historical_zones_for_ticker(
             ticker=ticker,
             daily_df=daily_prices,
-            hourly_df=hourly_prices,
+            intraday_df=intraday_prices,
+            snapshot_indices=snapshot_indices,
             config=config.zone_engine,
         )
 
@@ -186,12 +192,6 @@ def validate_provider_constraints(config: AutoBoundaryRunnerConfig) -> None:
             f"Invalid config date range: start_date {start_date.date()} is after end_date {end_date.date()}."
         )
 
-
-def _is_intraday_interval(interval: str) -> bool:
-    normalized = interval.strip().lower()
-    return normalized not in {"1d", "1w", "1wk", "1mo", "1mth", "1month", "1q", "1y"}
-
-
 def _safe_write_csv(df: pd.DataFrame, path: Path) -> Path:
     try:
         df.to_csv(path, index=False, encoding="utf-8-sig")
@@ -217,171 +217,41 @@ def _build_locked_file_fallback_path(path: Path) -> Path:
     return path.with_name(f"{path.stem}.{timestamp}{path.suffix}")
 
 
-def fetch_price_frame(
-    symbol: str,
-    start_date: str,
-    end_date: str,
-    provider: str | None,
-    interval: str,
-    adjustment: str,
-    extended_hours: bool,
-) -> pd.DataFrame:
-    start_ts = pd.Timestamp(start_date).normalize()
-    end_ts = pd.Timestamp(end_date).normalize()
-
-    if _should_chunk_intraday_requests(interval):
-        return _fetch_chunked_intraday_price_frame(
-            symbol=symbol,
-            start_ts=start_ts,
-            end_ts=end_ts,
-            provider=provider,
-            interval=interval,
-            adjustment=adjustment,
-            extended_hours=extended_hours,
-        )
-
-    return _fetch_single_price_frame(
-        symbol=symbol,
-        start_date=start_date,
-        end_date=end_date,
-        provider=provider,
-        interval=interval,
-        adjustment=adjustment,
-        extended_hours=extended_hours,
+def collect_zone_required_dates(
+    daily_df: pd.DataFrame,
+    zone_config: ZoneEngineConfig,
+) -> tuple[list[int], list[pd.Timestamp], list[pd.Timestamp]]:
+    snapshot_indices = build_snapshot_indices(
+        total_bars=len(daily_df),
+        min_history_bars=zone_config.min_history_bars,
+        refresh_every=zone_config.zone_refresh_every_n_bars,
     )
+    if not snapshot_indices:
+        return [], [], []
 
+    intraday_dates: set[pd.Timestamp] = set()
+    weekly_dates: set[pd.Timestamp] = set()
 
-def _fetch_single_price_frame(
-    symbol: str,
-    start_date: str,
-    end_date: str,
-    provider: str | None,
-    interval: str,
-    adjustment: str,
-    extended_hours: bool,
-) -> pd.DataFrame:
-    kwargs: dict[str, Any] = {
-        "symbol": symbol,
-        "start_date": start_date,
-        "end_date": end_date,
-        "interval": interval,
-        "adjustment": adjustment,
-        "extended_hours": extended_hours,
-    }
-    if provider:
-        kwargs["provider"] = provider
+    for idx in snapshot_indices:
+        calc_df = daily_df.iloc[:idx].copy().reset_index(drop=True)
+        if calc_df.empty:
+            continue
+        intraday_dates.update(get_recent_trading_dates(calc_df, zone_config.daily_vp_lookback_days))
+        weekly_dates.update(get_recent_trading_dates_for_weekly_window(calc_df, zone_config.weekly_vp_lookback_weeks))
 
-    result = obb.equity.price.historical(**kwargs)
-    df = to_dataframe(result)
-    if df is None or df.empty:
-        raise ValueError(f"No price data returned for {symbol} at interval {interval}.")
-
-    out = normalise_ohlcv_columns(df, date_col_name="date")
-    required_cols = {"date", "open", "high", "low", "close", "volume"}
-    if not required_cols.issubset(set(out.columns)):
-        raise ValueError(f"Price data for {symbol} at interval {interval} is missing OHLCV columns.")
-
-    for col in ["open", "high", "low", "close", "volume"]:
-        out[col] = pd.to_numeric(out[col], errors="coerce")
-    out = out.dropna(subset=["date", "open", "high", "low", "close", "volume"]).copy()
-    out = out.sort_values("date", kind="stable").reset_index(drop=True)
-    if out.empty:
-        raise ValueError(f"Price data for {symbol} at interval {interval} became empty after cleaning.")
-    return out
-
-
-def _fetch_chunked_intraday_price_frame(
-    symbol: str,
-    start_ts: pd.Timestamp,
-    end_ts: pd.Timestamp,
-    provider: str | None,
-    interval: str,
-    adjustment: str,
-    extended_hours: bool,
-) -> pd.DataFrame:
-    frames: list[pd.DataFrame] = []
-    chunk_windows = _build_intraday_request_windows(start_ts, end_ts, max_days_per_request=60)
-
-    for chunk_start, chunk_end in chunk_windows:
-        try:
-            frame = _fetch_single_price_frame(
-                symbol=symbol,
-                start_date=str(chunk_start.date()),
-                end_date=str((chunk_end + pd.Timedelta(days=1)).date()),
-                provider=provider,
-                interval=interval,
-                adjustment=adjustment,
-                extended_hours=extended_hours,
-            )
-        except Exception as exc:
-            raise ValueError(
-                f"Intraday chunk fetch failed for {symbol} at interval {interval} "
-                f"for window {chunk_start.date()} to {chunk_end.date()}."
-            ) from exc
-        frame = _filter_frame_to_date_window(frame, chunk_start=chunk_start, chunk_end=chunk_end)
-        if frame.empty:
-            raise ValueError(
-                f"Intraday chunk for {symbol} at interval {interval} returned no usable rows "
-                f"after window filtering for {chunk_start.date()} to {chunk_end.date()}."
-            )
-        frames.append(frame)
-
-    if not frames:
-        raise ValueError(f"No chunked price data could be fetched for {symbol} at interval {interval}.")
-
-    out = pd.concat(frames, ignore_index=True)
-    out = out.drop_duplicates(subset=["date"], keep="last").sort_values("date", kind="stable").reset_index(drop=True)
-    if out.empty:
-        raise ValueError(f"Chunked price data for {symbol} at interval {interval} became empty after deduplication.")
-    return out
-
-
-def _build_intraday_request_windows(
-    start_ts: pd.Timestamp,
-    end_ts: pd.Timestamp,
-    max_days_per_request: int,
-) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
-    if end_ts < start_ts:
-        return []
-
-    max_days_per_request = max(int(max_days_per_request), 1)
-    chunk_span = pd.Timedelta(days=max_days_per_request - 1)
-    windows: list[tuple[pd.Timestamp, pd.Timestamp]] = []
-    current_start = start_ts
-
-    while current_start <= end_ts:
-        current_end = min(current_start + chunk_span, end_ts)
-        windows.append((current_start, current_end))
-        if current_end >= end_ts:
-            break
-        current_start = current_end + pd.Timedelta(days=1)
-
-    return windows
-
-
-def _should_chunk_intraday_requests(
-    interval: str,
-) -> bool:
-    return _is_intraday_interval(interval)
-
-
-def _filter_frame_to_date_window(
-    df: pd.DataFrame,
-    chunk_start: pd.Timestamp,
-    chunk_end: pd.Timestamp,
-) -> pd.DataFrame:
-    if df.empty:
-        return df
-
-    dates = pd.to_datetime(df["date"]).dt.normalize()
-    mask = (dates >= chunk_start.normalize()) & (dates <= chunk_end.normalize())
-    return df.loc[mask].copy().reset_index(drop=True)
+    return (
+        snapshot_indices,
+        sorted(intraday_dates),
+        sorted(weekly_dates),
+    )
 
 
 def validate_source_coverage_for_ticker(
     ticker: str,
     daily_df: pd.DataFrame,
-    hourly_df: pd.DataFrame,
+    intraday_df: pd.DataFrame,
+    required_intraday_dates: list[pd.Timestamp],
+    required_weekly_dates: list[pd.Timestamp],
     zone_config: ZoneEngineConfig,
     hourly_interval: str,
     daily_interval: str,
@@ -395,32 +265,20 @@ def validate_source_coverage_for_ticker(
     if not snapshot_indices:
         raise ValueError(f"Not enough daily history to generate zones for {ticker}.")
 
-    first_snapshot_idx = snapshot_indices[0]
-    first_snapshot_df = daily_df.iloc[:first_snapshot_idx].copy().reset_index(drop=True)
-    if first_snapshot_df.empty:
-        raise ValueError(f"Unable to build the first validation snapshot for {ticker}.")
-
-    required_hourly_dates = get_recent_trading_dates(first_snapshot_df, zone_config.daily_vp_lookback_days)
-    required_weekly_dates = get_recent_trading_dates_for_weekly_window(first_snapshot_df, zone_config.weekly_vp_lookback_weeks)
-
-    if not required_hourly_dates:
+    if not required_intraday_dates:
         raise ValueError(f"No required {hourly_interval} dates could be derived for {ticker}.")
     if not required_weekly_dates:
         raise ValueError(f"No required {daily_interval} dates could be derived for {ticker}.")
 
-    available_hourly_dates = set(pd.to_datetime(hourly_df["date"]).dt.normalize().tolist())
-    missing_hourly_dates = [d for d in required_hourly_dates if d not in available_hourly_dates]
-    if missing_hourly_dates:
-        first_missing = pd.Timestamp(missing_hourly_dates[0]).date()
-        last_missing = pd.Timestamp(missing_hourly_dates[-1]).date()
-        available_start = pd.Timestamp(hourly_df["date"].min()).date()
-        available_end = pd.Timestamp(hourly_df["date"].max()).date()
+    available_intraday_dates = set(pd.to_datetime(intraday_df["date"]).dt.normalize().tolist()) if not intraday_df.empty else set()
+    missing_intraday_dates = [d for d in required_intraday_dates if d not in available_intraday_dates]
+    if missing_intraday_dates:
+        first_missing = pd.Timestamp(missing_intraday_dates[0]).date()
+        last_missing = pd.Timestamp(missing_intraday_dates[-1]).date()
         provider_label = provider or "default provider"
         raise ValueError(
             f"{ticker} {hourly_interval} data coverage is insufficient for strict daily VP generation. "
-            f"Required trading dates start at {required_hourly_dates[0].date()} but available {hourly_interval} data "
-            f"from {provider_label} only covers {available_start} to {available_end}. "
-            f"Missing window: {first_missing} to {last_missing}. "
+            f"Missing trading dates after chunked fetch from {provider_label}: {first_missing} to {last_missing}. "
             "Please shorten the research range, reduce min_history / VP lookback, or switch to a provider that serves deeper intraday history."
         )
 
@@ -429,29 +287,24 @@ def validate_source_coverage_for_ticker(
     if missing_weekly_dates:
         first_missing = pd.Timestamp(missing_weekly_dates[0]).date()
         last_missing = pd.Timestamp(missing_weekly_dates[-1]).date()
-        available_start = pd.Timestamp(daily_df["date"].min()).date()
-        available_end = pd.Timestamp(daily_df["date"].max()).date()
         provider_label = provider or "default provider"
         raise ValueError(
             f"{ticker} {daily_interval} data coverage is insufficient for strict higher-timeframe VP generation. "
-            f"Required trading dates start at {required_weekly_dates[0].date()} but available {daily_interval} data "
-            f"from {provider_label} only covers {available_start} to {available_end}. "
-            f"Missing window: {first_missing} to {last_missing}."
+            f"Missing trading dates from {provider_label}: {first_missing} to {last_missing}."
         )
 
 
 def generate_historical_zones_for_ticker(
     ticker: str,
     daily_df: pd.DataFrame,
-    hourly_df: pd.DataFrame,
+    intraday_df: pd.DataFrame,
+    snapshot_indices: list[int],
     config: ZoneEngineConfig,
 ) -> pd.DataFrame:
     if daily_df.empty:
         raise ValueError(f"No daily validation data available for {ticker}.")
-    if hourly_df.empty:
-        raise ValueError(f"No hourly background data available for {ticker}.")
-
-    snapshot_indices = build_snapshot_indices(len(daily_df), config.min_history_bars, config.zone_refresh_every_n_bars)
+    if intraday_df.empty:
+        raise ValueError(f"No intraday background data available for {ticker}.")
     if not snapshot_indices:
         raise ValueError(f"Not enough daily history to generate zones for {ticker}.")
 
@@ -465,7 +318,7 @@ def generate_historical_zones_for_ticker(
         daily_calc_with_features, daily_anchor_meta = build_avwap_features(calc_df, timeframe="D")
 
         recent_daily_dates = get_recent_trading_dates(calc_df, config.daily_vp_lookback_days)
-        daily_vp_source = filter_frame_by_dates(hourly_df, recent_daily_dates)
+        daily_vp_source = filter_frame_by_dates(intraday_df, recent_daily_dates)
         if daily_vp_source.empty:
             raise ValueError(f"No {ticker} 1h data available for daily VP window ending {daily_df.iloc[idx]['date']}.")
 
