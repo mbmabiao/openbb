@@ -1,0 +1,74 @@
+{
+  "breakout_by_failure_subtype": {
+    "fast_false_breakout": {
+      "avg_follow_through": -0.04785029143126742,
+      "count": 14,
+      "failed_follow_through_rate": 0.0,
+      "failure_rate": 1.0,
+      "false_breakout_rate": 1.0,
+      "median_follow_through": -0.05176231586226952,
+      "success_rate": 0.0,
+      "unresolved_rate": 0.0
+    },
+    "late_failure": {
+      "avg_follow_through": 0.004393051384034646,
+      "count": 2,
+      "failed_follow_through_rate": 0.0,
+      "failure_rate": 1.0,
+      "false_breakout_rate": 0.0,
+      "median_follow_through": 0.004393051384034646,
+      "success_rate": 0.0,
+      "unresolved_rate": 0.0
+    },
+    "none": {
+      "avg_follow_through": 0.004072175080772494,
+      "count": 22,
+      "failed_follow_through_rate": 0.0,
+      "failure_rate": 0.0,
+      "false_breakout_rate": 0.0,
+      "median_follow_through": 0.011865088494033232,
+      "success_rate": 1.0,
+      "unresolved_rate": 0.0
+    },
+    "unresolved": {
+      "avg_follow_through": 0.014176540921013156,
+      "count": 2,
+      "failed_follow_through_rate": 0.0,
+      "failure_rate": 0.0,
+      "false_breakout_rate": 0.0,
+      "median_follow_through": 0.014176540921013156,
+      "success_rate": 0.0,
+      "unresolved_rate": 1.0
+    }
+  },
+  "breakout_by_touch_count": {
+    "second_touch": {
+      "avg_follow_through": -0.013579426091266337,
+      "count": 40,
+      "failed_follow_through_rate": 0.0,
+      "failure_rate": 0.4,
+      "false_breakout_rate": 0.35,
+      "median_follow_through": 0.0017817017747225712,
+      "success_rate": 0.55,
+      "unresolved_rate": 0.05
+    }
+  },
+  "defense_by_touch_count": {
+    "first_touch": {
+      "avg_reversal_strength": 0.05965654804671635,
+      "avg_zone_defense_score": 2.4964935414307936,
+      "count": 85,
+      "failed_hold_rate": 0.9294117647058824,
+      "hold_rate": 0.07058823529411765,
+      "unresolved_rate": 0.0
+    },
+    "second_touch": {
+      "avg_reversal_strength": 0.06670216098692607,
+      "avg_zone_defense_score": 2.4755747300282875,
+      "count": 37,
+      "failed_hold_rate": 0.8918918918918919,
+      "hold_rate": 0.10810810810810811,
+      "unresolved_rate": 0.0
+    }
+  }
+}

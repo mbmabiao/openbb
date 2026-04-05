@@ -21,6 +21,7 @@ ZONE_REQUIRED_COLUMNS = [
 ]
 
 BREAKOUT_EVENT_TYPES = {"breakout_up", "breakout_down"}
+DEFENSE_EVENT_TYPES = {"test", "probe"}
 
 
 @dataclass(slots=True)

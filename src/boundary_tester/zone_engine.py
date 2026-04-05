@@ -649,6 +649,7 @@ def build_zone_rows_from_snapshot(
         rows.append(
             {
                 "zone_id": f"{ticker}::{pd.Timestamp(valid_from).strftime('%Y%m%d')}::{zone['side']}::{i}",
+                "structural_zone_key": _build_structural_zone_key(ticker=ticker, zone=zone),
                 "ticker": ticker,
                 "valid_from": pd.Timestamp(valid_from),
                 "valid_to": valid_to,
@@ -672,6 +673,42 @@ def build_zone_rows_from_snapshot(
             }
         )
     return rows
+
+
+def merge_snapshot_zones_into_structural_zones(zone_df: pd.DataFrame) -> pd.DataFrame:
+    if zone_df.empty or "structural_zone_key" not in zone_df.columns:
+        return zone_df.copy()
+
+    grouped_rows: list[dict] = []
+    for structural_zone_key, group in zone_df.groupby("structural_zone_key", sort=False):
+        row0 = group.iloc[0]
+        grouped_rows.append(
+            {
+                "structural_zone_key": structural_zone_key,
+                "ticker": row0["ticker"],
+                "side": row0["side"],
+                "zone_class": row0["zone_class"],
+                "timeframe": ",".join(sorted(set(",".join(group["timeframe"].astype(str)).split(",")))),
+                "source_reason": ",".join(sorted(set(group["source_reason"].astype(str)))),
+                "lower": float(group["lower"].min()),
+                "upper": float(group["upper"].max()),
+                "center": float(group["center"].mean()),
+                "snapshot_count": int(len(group)),
+                "valid_from": pd.to_datetime(group["valid_from"]).min(),
+                "valid_to": pd.to_datetime(group["valid_to"]).max(),
+            }
+        )
+    return pd.DataFrame(grouped_rows)
+
+
+def _build_structural_zone_key(ticker: str, zone: dict) -> str:
+    center = float(zone["center"])
+    width = max(float(zone["upper"]) - float(zone["lower"]), 0.0)
+    center_bucket = round(center * 200.0) / 200.0
+    width_bucket = round(width * 400.0) / 400.0
+    source_types = ",".join(sorted(zone.get("source_types", set())))
+    timeframes = ",".join(sorted(zone.get("timeframes", set())))
+    return f"{ticker}::{zone['side']}::{center_bucket:.4f}::{width_bucket:.4f}::{source_types}::{timeframes}"
 
 
 def _zone_class_from_source_types(source_types: set[str]) -> str:

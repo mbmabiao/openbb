@@ -79,6 +79,8 @@ def prepare_zone_frame(zone_df: pd.DataFrame) -> pd.DataFrame:
     if "confluence_count" not in out.columns:
         out["confluence_count"] = 1
     out["confluence_count"] = pd.to_numeric(out["confluence_count"], errors="coerce").fillna(1).astype(int)
+    if "structural_zone_key" not in out.columns:
+        out["structural_zone_key"] = out["zone_id"].astype(str)
 
     if "metadata" not in out.columns:
         out["metadata"] = [{} for _ in range(len(out))]
