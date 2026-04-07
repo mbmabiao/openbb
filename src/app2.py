@@ -1464,18 +1464,6 @@ def render_lwc_chart_with_focus_header(
         ensure_ascii=False,
     )
 
-def fetch_income_default(symbol: str):
-    return obb.equity.fundamental.income(symbol)
-
-def fetch_balance_default(symbol: str):
-    return obb.equity.fundamental.balance(symbol)
-
-def fetch_cash_default(symbol: str):
-    return obb.equity.fundamental.cash(symbol)
-
-def fetch_ratios_fmp(symbol: str):
-    return obb.equity.fundamental.ratios(symbol, provider="fmp")
-
     html = f"""
 <div id="{container_id}" class="lwc-wrap">
   <div id="{container_id}-header" class="lwc-header"></div>
