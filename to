@@ -1,0 +1,165 @@
+你要做的不是“一次把整段时间全部直接请求下来”，而是：先确定测试真正需要哪些日期，再按 provider 的上限分段请求，再拼接，再测试。
+
+你可以按这个最简方案做：
+
+你应该怎么做
+1. 先定义测试窗口
+
+先明确：
+
+测试起点和终点
+你要的粒度（5m / 15m / 1h）
+你每个 snapshot 或每个 zone 需要看未来几天
+
+也就是先得到一句话：
+
+我这次 test，到底需要哪些交易日的数据。
+
+2. 先收集“真正需要的交易日”
+
+不要一上来就请求整段分钟线。
+
+应该先从你的测试逻辑出发，整理出：
+
+所有 snapshot date
+每个 snapshot 后要验证的 future window
+合并后得到一组 needed_trading_dates
+
+例如：
+
+snapshot 在 1 月 10 日
+要看后面 5 个交易日
+那就把这 6 天加入需求集合。
+
+最终你得到的是：
+
+这次 test 真正要用到的所有交易日列表。
+
+3. 把这些日期压缩成若干连续区间
+
+把 needed_trading_dates 变成若干段：
+
+例如：
+
+2025-01-10 ~ 2025-01-17
+2025-02-03 ~ 2025-02-08
+2025-04-01 ~ 2025-04-20
+
+这样做的目的：
+
+避免中间明明不用的数据也一起拉。
+
+4. 每个连续区间再按上限切块请求
+
+这是最关键的一步。
+
+如果你的 provider 对某个 intraday interval 有 60 天限制，那就设一个安全值，比如：
+
+每块最多 59 天
+
+然后把大区间切成：
+
+chunk1
+chunk2
+chunk3
+
+对每个 chunk 单独请求。
+
+核心思想就是：
+
+大区间不直接拉，拆成多个小区间分别拉。
+
+5. 把所有 chunk 拼接起来
+
+把所有返回的 dataframe：
+
+concat
+按时间排序
+去重
+标准化列名
+检查缺失值
+
+这样你得到一份完整的、可用于 test 的细粒度价格数据。
+
+6. 最后只保留测试真正需要的日期
+
+即使你按 chunk 拉回来了，最后还是建议再过滤一次：
+
+只保留 needed_trading_dates 里的 bars
+
+这样数据更干净，也更省内存。
+
+7. 再把这份数据喂给 boundary tester
+
+到这一步才进入你的测试主流程：
+
+zone 生成
+event detection
+breakout label
+summary/report
+
+也就是说：
+
+“分段请求”属于数据准备层，不属于 test 逻辑本身。
+
+你应该新增的两个函数
+
+你现在最需要的是这两个能力：
+
+A. 连续区间分块器
+
+输入：
+
+start_date
+end_date
+max_span_days=59
+
+输出：
+
+一组 chunk 区间
+B. 按目标交易日分段抓取器
+
+输入：
+
+symbol
+interval
+needed_trading_dates
+provider
+
+内部做：
+
+日期分组
+chunk 请求
+拼接
+去重
+过滤
+
+输出：
+
+一份完整 intraday dataframe
+最推荐的工程放法
+
+不要把这套逻辑写进 run_boundary_tester.py 入口。
+
+应该放在：
+
+data loader
+auto_runner
+或独立的 price_fetcher.py
+
+入口只负责：
+
+读配置
+调主流程
+
+这样后面你做：
+
+boundary engine
+breakout event engine
+validation framework
+
+都能复用这套数据抓取逻辑。
+
+一句话 summary
+
+正确做法是：先算出 test 真正需要哪些交易日，再按 59 天之类的安全窗口分段请求对应粒度数据，最后拼接去重后送入测试。

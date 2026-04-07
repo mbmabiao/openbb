@@ -1,2 +1,7 @@
-streamlit
-openbb-platform
+streamlit==1.55.0
+openbb==4.7.1
+pandas==2.3.3
+plotly==6.6.0
+PyYAML==6.0.3
+streamlit-lightweight-charts==0.7.20
+streamlit-hotkeys==0.6.0

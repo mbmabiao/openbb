@@ -1,0 +1,96 @@
+高质量突破（High-Quality Breakout）的定义与评估框架
+一、核心结论（Summary）
+
+在当前系统中，高质量突破并不是由单一条件定义，而是通过一组结构确认 + 行为验证 + 结果表现共同决定的。
+
+本质上，高质量突破回答的是：
+
+这个突破是否
+真的发生了 → 被市场接受了 → 有延续性 → 没被迅速否定
+
+二、突破的三层结构
+
+整个 breakout 体系可以分为三层：
+
+1️⃣ 事件定义层（Event Definition）
+
+首先，系统识别 breakout：
+
+breakout_up（突破阻力）
+breakout_down（跌破支撑）
+
+核心条件：
+
+价格必须从 zone 内部开始
+close 必须连续至少 2 根 bar 在 zone 外
+且超过 breakout buffer（当前为 0.2%）
+
+👉 这一步只是回答：
+
+“有没有发生突破？”
+
+2️⃣ 确认层（Confirmation Layer）
+
+不是所有 breakout 都有效，需要进一步确认：
+
+① breakout_confirmed_flag
+
+突破是否有“站出去”的距离：
+
+距离 ≥ min_breakout_distance_pct（当前为 0 → 几乎不限制）
+或满足 ATR 条件（当前未启用）
+
+👉 含义：
+
+是否只是“刚好碰出去”，还是“明显离开 zone”
+
+② hold_outside_flag
+
+突破后是否站稳在 zone 外：
+
+至少连续 N 根 bar 在外（当前 = 2）
+
+👉 含义：
+
+市场是否接受这个突破
+
+3️⃣ 结果层（Outcome / Quality Layer）
+
+这是决定“高质量突破”的关键。
+
+① target_hit_flag
+
+是否达到预设推进目标：
+
+当前是固定 3%（success_move_pct）
+
+👉 含义：
+
+突破是否真的“走开”
+
+② retest_success_flag
+
+是否出现：
+
+回踩（retest）
+并且随后继续创新高/低
+
+👉 含义：
+
+突破后是否形成结构确认（acceptance + continuation）
+
+③ max_favorable_excursion（MFE）
+
+突破后最大顺向推进幅度
+
+👉 含义：
+
+最理想情况下，这个 breakout 能走多远
+
+④ reentry_depth_pct
+
+价格回到 zone 内的深度
+
+👉 含义：
+
+突破有没有被“打回去”

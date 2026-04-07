@@ -9,7 +9,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from openbb import obb
 
-
+obb.user.credentials.fmp_api_key = "TK2CXypVOR4oXTO4mtO5iO1o6LRBYNFH"
 
 st.set_page_config(page_title="Institutional Support/Resistance Dashboard", layout="wide")
 st.title("Equity Data Dashboard")
@@ -476,7 +476,7 @@ def render_replay_controls(df_calc: pd.DataFrame) -> pd.Timestamp:
 
     with c1:
         st.button(
-            "< Prev Day",
+            "← Prev Day",
             key=f"replay_prev_day_{symbol}",
             on_click=move_replay,
             args=(-1,),
@@ -495,7 +495,7 @@ def render_replay_controls(df_calc: pd.DataFrame) -> pd.Timestamp:
 
     with c3:
         st.button(
-            "Next Day >",
+            "Next Day →",
             key=f"replay_next_day_{symbol}",
             on_click=move_replay,
             args=(1,),
@@ -1209,24 +1209,24 @@ def show_news(title, fetcher, empty_message="No news data returned."):
 
 
 def show_definitions():
-    st.markdown("### Definitions")
+    st.markdown("### Definitions / 定义")
     st.markdown(
         f"""
 **This version adds multi-timeframe confluence, reaction validation, and replay mode.**  
-**This build adds multi-timeframe confluence, reaction validation, and replay mode.**
+**这版新增了多周期共振、历史反应验证与复盘模式。**
 
-**1) Daily and Weekly Zones**
+**1) Daily and Weekly Zones / 日线与周线区域**
 - Daily VP input: recent **{vp_lookback_days}** trading days of **1h OHLCV**
 - Higher-timeframe VP input: recent **{weekly_vp_lookback}** weekly windows of **1d OHLCV**
 - Composite VP method: each source bar distributes volume across all covered price bins
 - No fallback to lower-precision VP when the required source interval is unavailable
 - Each zone explicitly records timeframe source(s)
 
-**2) Multi-timeframe confluence**
+**2) Multi-timeframe confluence / 多周期共振**
 - Daily and weekly zones are merged when close/overlapping
 - Zones with both **D** and **W** sources get confluence bonus
 
-**3) Reaction validation**
+**3) Reaction validation / 反应验证**
 For each zone, the system tracks:
 - touch count
 - first-touch quality
@@ -1234,7 +1234,7 @@ For each zone, the system tracks:
 - reclaim rate
 - repeated-test decay
 
-**4) Institutional score**
+**4) Institutional score / 机构化评分**
 Combines:
 - volume structure
 - inventory logic
@@ -1243,12 +1243,12 @@ Combines:
 - historical reaction quality
 - width penalty
 
-**5) Replay mode**
+**5) Replay mode / 复盘模式**
 - choose any historical trading date
-- treat that selected date as "today" for all calculations
+- treat that selected date as “today” for all calculations
 - buttons and date input are synchronised
 
-**6) Latest bar handling**
+**6) Latest bar handling / 最后一根K处理**
 - chart frame: {"show live last bar" if show_live_last_bar_on_chart else "hide live last bar"}
 - calculation frame: {"exclude latest bar" if exclude_last_unclosed_bar else "include latest bar"}
 """
@@ -1743,11 +1743,11 @@ def render_zone_left_panel(
     resistance_zones: list[dict],
     current_price: float,
 ):
-    st.markdown("#### Zones")
+    st.markdown("#### Zones / 区域标签")
     st.metric("Calc Close", f"{current_price:.2f}")
 
     if resistance_zones:
-        st.markdown("**Resistance**")
+        st.markdown("**Resistance / 压力位**")
         for zone in resistance_zones:
             st.markdown(
                 f"""
@@ -1763,7 +1763,7 @@ def render_zone_left_panel(
         st.info("No resistance zones.")
 
     if support_zones:
-        st.markdown("**Support**")
+        st.markdown("**Support / 支撑位**")
         for zone in support_zones:
             st.markdown(
                 f"""
@@ -2252,8 +2252,7 @@ with tabs[3]:
 with tabs[4]:
     show_dataframe_result(
         f"Ratios — {symbol}",
-        lambda: obb.equity.fundamental.ratios(symbol, provider=fund_provider)
-        if fund_provider else obb.equity.fundamental.ratios(symbol),
+        lambda: obb.equity.fundamental.ratios(symbol, provider=fmp),
         empty_message="No ratios data returned.",
     )
 

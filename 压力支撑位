@@ -1,457 +1,245 @@
-# 支撑位方法论说明 / Support Methodology Note
+# Boundary Tester 当前代码检查：疑似 BUG / 高优先级问题清单
 
-## 一、核心结论 / Core Conclusion
-
-本系统中的“支撑位”，并不被定义为某一条精确的价格线，而是被定义为一个更符合真实市场行为的**价格区域（zone）**。  
-这一价格区域之所以可能形成支撑，是因为它往往同时具备以下几类特征：
-
-1. **历史成交集中**：市场曾在该区域发生过大量交易，说明这里曾经被市场接受。  
-2. **成本锚定效应**：从关键高低点、跳空点或大阳大阴日计算得到的 Anchored VWAP，会在该区域形成资金平均成本参考。  
-3. **库存与筹码结构**：若该区域位于当前价格下方，则更可能对应潜在承接；若位于当前价格上方，则更可能形成套牢盘与卖压。  
-4. **多周期共振**：如果同一区域同时出现在日线与周线结构中，则其重要性会明显提升。  
-5. **历史反应验证**：若价格过去回到该区域时，曾出现明显反弹、收回或拒绝，则说明该区域不仅“结构上合理”，也“行为上被验证”。
-
-因此，这套系统真正要寻找的，不是“最精确的一根线”，而是：
-
-**最可能重新引发市场反应、最值得优先关注的支撑区域。**
-
-Support in this framework is not treated as a single precise line, but as a **price zone**.  
-A zone becomes meaningful when it reflects a combination of:
-
-1. **Historical volume concentration**  
-2. **Anchored cost basis**
-3. **Inventory positioning**
-4. **Multi-timeframe confluence**
-5. **Validated historical reaction**
-
-The purpose is therefore not to predict an exact turning point, but to identify:
-
-**the price areas most likely to attract renewed market response.**
+> 说明：
+> - 下面不是泛泛建议，而是我认为**会影响结果正确性、研究可信度或系统稳定性**的问题清单。
+> - 我按优先级分成：P0 / P1 / P2
+> - P0 = 必须先修，不然统计结果不可信
+> - P1 = 强烈建议尽快修，不然定义会偏
+> - P2 = 工程健壮性与后续扩展问题
 
 ---
 
-## 二、总体框架 / Overall Framework
+## P0-01：`event_detector` 与 `labeler` 的 `bar_index` 坐标系不一致
 
-整套支撑逻辑可以概括为五个步骤：
+### 位置
+- `src/boundary_tester/event_detector.py`
+- `src/boundary_tester/labeler.py`
 
-### 1. 数据准备 / Data preparation
-系统首先获取历史 OHLCV 数据，并完成字段标准化。  
-随后将数据分成两个部分：
+### 现象
+`event_detector.py` 中：
+- 针对每个 zone，会先对价格数据做局部切片：
+  - 按 ticker 过滤
+  - 按 `valid_from` 过滤
+  - 按 `valid_to` 过滤
+  - 然后 `reset_index(drop=True)`
+- 随后把这个局部切片里的 `idx` 存入事件字段 `bar_index`
 
-- **df_plot**：用于图表展示，可保留最后一根实时 K 线  
-- **df_calc**：用于支撑/压力计算，默认排除最后一根未收盘 K 线
+`labeler.py` 中：
+- 再次按 ticker 取完整 `price_df`
+- 再 `reset_index(drop=True)`
+- 直接使用事件中的 `bar_index` 去切 future window
 
-这样做的目的，是避免未完成的价格波动干扰结构判断。
+### 本质问题
+这两个 `bar_index` **不属于同一坐标系**：
 
-The system first standardises OHLCV data and separates:
+- `event_detector` 里的 `bar_index` = **zone 有效窗口内的局部索引**
+- `labeler` 里的 `price_df` = **完整 ticker 时间序列**
 
-- **plot data** for chart display
-- **calculation data** for support/resistance modelling
+因此 `labeler` 里 future window 很可能从错误位置开始切，导致标签错位。
 
-The latest unfinished bar is excluded from calculation by default, so the framework is based on confirmed structure rather than intraday noise.
+### 影响
+会直接污染：
+- `label`
+- `success_flag`
+- `failure_flag`
+- `unresolved_flag`
+- `max_favorable_excursion`
+- `max_adverse_excursion`
+- `follow_through_pct`
+- `bars_to_reentry`
+- `bars_to_target`
+- `summary.csv`
+- `report.md`
+
+### 风险等级
+**P0 / 致命**
+
+### 建议修复方案
+#### 推荐方案（最稳）
+不要把 `bar_index` 作为跨模块主定位键。
+
+改为：
+- 事件中保留 `event_timestamp`
+- `labeler` 中使用：
+  - `ticker`
+  - `event_timestamp`
+来回到完整价格序列中重新定位 breakout bar
+
+#### 备选方案
+同时存两个索引：
+- `local_bar_index`
+- `global_bar_index`
+
+然后 labeler 一律使用 `global_bar_index`
+
+## P0-02：yfinance 1h 数据约束检查与官方限制不一致
+
+### 位置
+- `src/boundary_tester/auto_runner.py`
+- 函数：`validate_provider_constraints`
+
+### 现象
+当前代码里对 yfinance 1h 数据的起始时间限制使用了：
+- `today - 729 days`
+
+### 本质问题
+这与 yfinance 官方文档对 intraday 数据限制不一致。  
+官方文档写的是：
+- intraday 数据不能超过最近 60 天
+
+因此当前代码属于：
+- 使用了一个“经验假设窗口”
+- 而不是 provider 文档约束
+
+### 影响
+会造成：
+1. 系统以为可以合法拉更长 1h 数据
+2. 实际 provider 返回空、截断或不稳定
+3. zone 生成阶段出现误判“数据足够”
+4. 后续验证结果建立在不完整数据上
+
+### 风险等级
+**P0 / 高风险**
+
+### 建议修复方案
+对 yfinance provider 采用保守硬限制：
+- 1h / intraday 统一按官方文档处理
+---
+## P1-01：`false_breakout_rate` 当前等于 `failure_rate`，统计定义不准确
+### 位置
+- `src/boundary_tester/reporter.py`
+- 函数：`build_summary_table`
+### 现象
+当前：
+- `false_breakout_rate = failure_flag.mean()`
+
+### 本质问题
+`failure` 不一定都等于 `false breakout`
+
+举例：
+- breakout 后没有快速 reentry
+- 但 follow-through 不够强
+- 这可能是“失败延续”，未必是“假突破”
+
+### 影响
+会导致报告中：
+- `false_breakout_rate` 被高估
+- 假突破与弱延续被混为一谈
+- 误导对 zone 边界质量的判断
+
+### 风险等级
+**P1 / 统计定义问题**
+
+### 建议修复方案
+拆成两个指标：
+
+#### 1. `false_breakout_rate`
+定义为：
+- `reentry_flag == 1`
+- 或明确识别到 `failed_breakout_up/down`
+
+#### 2. `failed_follow_through_rate`
+定义为：
+- 未 reentry
+- 但没有达到 success threshold
+
+### 推荐动作
+- 尽快修
+- 同时修改 report 文案和 summary 字段名
 
 ---
 
-### 2. 候选区域生成 / Candidate zone discovery
-系统通过多种结构来源来生成候选支撑区域，主要包括：
+## P1-02：`failed_breakout` 定义过于宽松，容易把正常回踩误判成失败突破
 
-- **日线成交密集区（Daily Volume Profile Zones）**
-- **周线成交密集区（Weekly Volume Profile Zones）**
-- **日线 Anchored VWAP 区域**
-- **周线 Anchored VWAP 区域**
+### 位置
+- `src/boundary_tester/event_detector.py`
+- 函数：`_detect_post_breakout_events`
 
-这些来源共同构成了最初的候选支撑集合。
+### 现象
+当前逻辑大致是：
 
-Candidate support zones are generated from multiple structural sources:
+#### resistance side
+- breakout 后若 `failure_reentry_bars` 内 `close <= boundary`
+- 就可视为 failed breakout
 
-- daily volume profile zones
-- weekly volume profile zones
-- daily anchored VWAP zones
-- weekly anchored VWAP zones
+#### support side
+- breakout 后若 `close >= boundary`
+- 就可视为 failed breakout
 
-These form the initial set of candidate levels.
+### 本质问题
+这个定义太敏感：
+- 很多正常回踩会暂时 close 到 boundary 附近
+- 甚至轻微回到边界里一点点
+- 但后续仍可能延续成功
 
----
+当前代码没有要求：
+- reentry 深度
+- 连续 reentry bar 数
+- 回到 zone center / deeper-in-zone
 
-### 3. 区域合并 / Zone merging
-如果多个来源给出的区域彼此接近或发生重叠，系统会将它们合并。  
-合并后的区域不再只是单一证据，而是成为一个**综合证据区**。
+### 影响
+会高估：
+- `failed_breakout`
+- `failure_rate`
+- `false_breakout_rate`
 
-When multiple candidate zones overlap or sit very close together, they are merged into broader composite zones.  
-This transforms isolated signals into **confluence areas**.
+### 风险等级
+**P1 / 事件定义偏差**
 
----
+### 建议修复方案
+failed breakout 应至少满足更严格条件之一：
+- close 回到 zone 深处（如超过 `upper - x% * zone_width`）
+- 连续 N 根 close 回到 zone 内
+- close 回到 zone center 另一侧
+- reentry 后出现显著 adverse continuation
 
-### 4. 反应验证 / Reaction validation
-系统不会只停留在“这个区域看起来重要”，还会进一步检查：
-
-- 历史上价格是否多次触碰该区域
-- 首次触碰后是否出现明显反弹或回落
-- 是否存在跌破后收回 / 突破后回落
-- 多次测试后，该区域是否出现衰减
-
-这一层让系统从“找位”进一步进入“验位”。
-
-The framework does not stop at structural plausibility.  
-It also checks whether price historically reacted around the zone:
-
-- how often it was touched
-- whether the first touch was meaningful
-- whether breaks were reclaimed
-- whether repeated tests weakened the level
-
-This is the key step that turns a structural candidate into a more credible support/resistance area.
+### 推荐动作
+- 参数化 reentry depth / reentry bars
 
 ---
 
-### 5. 排序与展示 / Ranking and display
-最后，系统根据结构强度、周期共振与历史反应，对所有候选区域排序，  
-只展示最值得关注的少数支撑区和压力区。
+## P1-03：breakout 确认在事件层和标签层重复计算，容易导致 success 偏低
 
-Finally, all candidate zones are ranked using structural quality, timeframe confluence, and reaction evidence,  
-and only the highest-priority zones are displayed.
+### 位置
+- `src/boundary_tester/event_detector.py`
+- `src/boundary_tester/labeler.py`
 
----
+### 现象
+当前流程中：
 
-## 三、第一层：成交密集区为什么重要 / Why Volume Profile Matters
+#### 事件层
+breakout 已要求：
+- 连续 `min_close_outside_zone` 根 bar 收在边界外
 
-支撑位最基础的来源，是**成交密集区**。  
-这背后的逻辑并不复杂：如果某个价格带在过去发生过大量交易，那么它就不仅仅是一个价格数字，而是一个曾经被市场充分交易、充分接受过的区域。
+#### 标签层
+又要求：
+- future 前 `min_close_outside_zone` 根 bar 也要全部 outside
 
-在实现上，系统会：
+### 本质问题
+这是“双重确认”：
+- breakout 事件本身已经做了 outside persistence 检查
+- labeler 又重复检查一次
+- 且 future_df 不包含 breakout 当根 bar
 
-1. 选定一个历史窗口  
-2. 将价格区间切分成若干个 bins  
-3. 将每根 K 线的 typical price 落入对应的 bin  
-4. 将该 K 线的成交量累加到该价格 bin  
-5. 选出成交量处于高分位数以上的 bins  
-6. 将相邻高量 bins 合并成 zone
+于是 success 条件比表面参数看起来更严格。
 
-这样得到的，不是一个单点，而是一段价格带。
+### 影响
+- success 样本被压低
+- failure / unresolved 被抬高
+- zone 好坏判断偏悲观
 
-A volume profile zone matters because it reflects prior market acceptance.  
-If a large amount of volume traded within a price range, then that area likely represents a meaningful concentration of cost basis and participation.
+### 风险等级
+**P1 / 标签逻辑偏差**
 
-Implementation-wise, the system:
+### 建议修复方案
+二选一：
 
-1. selects a lookback window
-2. divides price into bins
-3. maps each bar’s typical price into a bin
-4. accumulates volume in each bin
-5. selects high-volume bins above a threshold
-6. merges neighbouring high-volume bins into zones
+#### 方案 A（推荐）
+- 事件层负责 breakout confirmation
+- 标签层不再重复检查 persistence
 
-The result is a **price area**, not a single line.
+#### 方案 B
+- 标签层保留，但把 breakout bar 也纳入 outside persistence 逻辑
 
----
-
-## 四、第二层：为什么要使用 Anchored VWAP / Why Anchored VWAP Is Added
-
-单纯依赖成交密集区仍然不够，因为成交密集区更多反映的是“过去哪里交易过”，  
-而不一定能说明“关键事件之后，市场的平均成本参考在哪里”。
-
-这就是 Anchored VWAP 的意义。
-
-系统会从一些关键锚点开始计算 AVWAP，例如：
-
-- 近期重要高点
-- 近期重要低点
-- gap up / gap down
-- 大阳线
-- 大阴线
-
-从这些位置向后累计成交额与成交量，得到对应的平均成本线。
-
-Anchored VWAP adds a second dimension: **event-based cost basis**.  
-Volume profile tells us where trading happened, but AVWAP tells us where average cost basis may have shifted after meaningful events.
-
-Typical anchors include:
-
-- major highs
-- major lows
-- gap up / gap down
-- large up days
-- large down days
-
-These anchored VWAPs represent how market cost basis evolved after those points.
-
-当某个 AVWAP 恰好落在某个成交密集区附近时，支撑位的重要性会显著提高。  
-因为这意味着：
-
-- 这里不仅有人交易过  
-- 而且这里可能还是重要参与者的平均成本附近
-
-When an AVWAP overlaps with a high-volume area, the support zone becomes more meaningful, because it reflects both:
-
-- prior participation
-- anchored average cost basis
-
----
-
-## 五、第三层：库存逻辑 / Inventory Logic
-
-支撑位并不只是技术图形，它还反映了仓位结构。  
-系统中的一个核心思想是：
-
-- **当前价格下方的大成交区**，更可能构成承接与支撑  
-- **当前价格上方的大成交区**，更可能构成套牢盘与卖压
-
-也就是说，系统不是只问“哪里成交过”，而是进一步问：
-
-- 这些成交现在位于现价上方还是下方？
-- 它们更可能表现为支撑型库存，还是压力型库存？
-
-Support and resistance are interpreted through inventory logic:
-
-- heavy volume below price may behave as support
-- heavy volume above price may behave as overhead resistance
-
-This shifts the logic from simple chart pattern recognition to a more realistic interpretation of positioning and cost basis.
-
----
-
-## 六、第四层：多周期共振 / Multi-Timeframe Confluence
-
-为了让支撑位更稳健，系统加入了**多周期共振**。  
-目前主要体现在：
-
-- **日线结构（D）**
-- **周线结构（W）**
-
-日线负责识别更细的近端结构，周线负责过滤噪音、强化中期结构。  
-如果某个支撑区域同时出现在日线与周线之中，那么它的可信度通常会明显高于只来自单一周期的区域。
-
-For greater robustness, the framework includes **multi-timeframe confluence**:
-
-- daily structure for tactical detail
-- weekly structure for broader confirmation
-
-If a zone is supported by both daily and weekly evidence, its importance rises materially.
-
-系统会明确记录每个区域来自哪个周期，例如：
-
-- `D`：仅来自日线
-- `W`：仅来自周线
-- `D,W`：日线与周线共同确认
-
-This is explicitly labelled in the output:
-
-- `D` for daily-only
-- `W` for weekly-only
-- `D,W` for combined daily and weekly confluence
-
-这一步的意义在于：  
-真正重要的支撑位，往往不是一个周期“恰好看起来不错”，而是在不同时间尺度下都成立。
-
-The value of this step is simple:  
-the strongest support levels are usually those that remain meaningful across more than one timeframe.
-
----
-
-## 七、第五层：反应验证 / Reaction Validation
-
-这是当前支撑逻辑中最重要的升级之一。  
-因为一个区域即使在结构上看起来很合理，也不代表它在真实市场中一定有效。
-
-所以系统会进一步验证：
-
-### 1. 触碰次数 / Touch count
-价格过去曾多少次进入该区域？  
-触碰次数本身有信息量，但次数太多也可能意味着该区域正在被消耗。
-
-How many times has price touched the zone?  
-Touch count provides useful evidence, but too many tests may imply weakening.
-
-### 2. 首次触碰质量 / First-touch quality
-第一次触碰通常最有价值。  
-如果价格第一次进入支撑区就出现明显反弹，那么该区域更可能是真正有效的支撑。
-
-The first touch often matters most.  
-If price reacts strongly on first contact, the zone becomes more credible.
-
-### 3. 强反应比例 / Strong reaction rate
-系统会观察价格进入该区域后，在未来若干根 K 线里是否出现显著反弹（支撑）或显著回落（压力）。
-
-The framework checks whether price produced a strong forward move after touching the zone.
-
-### 4. 收回比例 / Reclaim rate
-对支撑来说，如果价格一度跌破下边界，但之后又收回到区域内或区域上方，  
-这说明市场并未真正接受更低价格。  
-这类“下破后收回”是非常有价值的验证信号。
-
-For support, a break below the zone followed by a reclaim suggests the market failed to accept lower prices.  
-This is often one of the strongest validation signals.
-
-### 5. 多次测试衰减 / Repeated-test decay
-如果某个区域被反复测试，但每次反应都越来越弱，那么它虽然依旧“存在”，  
-但其支撑意义可能已经下降。
-
-If a zone is tested repeatedly and reactions weaken over time, its quality should be discounted.
-
----
-
-## 八、为什么要排除最后一根未收盘 K 线 / Why the Latest Unclosed Bar Is Excluded
-
-系统默认在计算支撑/压力时排除最后一根未收盘 K 线。  
-这样做非常重要，因为未收盘的 bar 仍可能在 high、low、close 上发生明显变化。
-
-如果过早把它纳入：
-
-- AVWAP 可能被临时波动干扰
-- 成交密集区判断可能受到短期异常影响
-- 支撑/压力的确认容易被未完成信号污染
-
-By default, the latest unfinished bar is excluded from structural calculations.  
-This prevents temporary intraday movements from distorting:
-
-- AVWAP positioning
-- volume profile structure
-- support/resistance assessment
-
-因此，这一设计确保系统主要基于**已经确认的结构**，而不是未完成的盘中噪音。
-
-The result is a framework grounded in confirmed structure rather than unstable live noise.
-
----
-
-## 九、评分系统在做什么 / What the Ranking System Actually Does
-
-候选区域很多，但真正值得关注的通常只有少数。  
-因此系统会对区域进行排序。
-
-目前排序主要综合以下几类因素：
-
-1. **成交密集强度**
-2. **库存与成本结构**
-3. **AVWAP 支撑/压制贡献**
-4. **周期共振程度**
-5. **历史反应验证质量**
-6. **区域宽度惩罚**
-
-The framework ranks zones by combining:
-
-1. volume profile strength
-2. inventory logic
-3. AVWAP contribution
-4. timeframe confluence
-5. reaction validation quality
-6. width penalty
-
-这一排序并不是在说：
-
-“这个位置一定有效。”
-
-它真正表达的是：
-
-**在所有潜在 level 里，哪些区域最值得优先关注。**
-
-This score does not claim certainty.  
-It simply answers:
-
-**among all plausible levels, which zones deserve the most attention?**
-
----
-
-## 十、支撑位的正式定义 / Formal Definition of Support
-
-综合整套逻辑，支撑位可以定义为：
-
-**支撑位不是一条单独的价格线，而是一个价格区域。  
-该区域同时体现历史成交集中、事件后的平均成本锚定、当前库存位置，并且在历史价格行为中曾多次表现出承接、收回或拒绝下行的反应。  
-当该区域同时得到多个周期的确认时，其重要性会进一步提高。**
-
-Support can be formally defined as:
-
-**a price zone, not a single line, where historical volume concentration, event-anchored cost basis, and favourable inventory positioning overlap, and where past price action has shown repeated evidence of support-like behaviour such as bounce, reclaim, or rejection of lower prices.  
-Its significance increases further when confirmed across multiple timeframes.**
-
----
-
-## 十一、压力位的对应定义 / Parallel Definition of Resistance
-
-压力位的逻辑与支撑位是对称的，只是方向相反。
-
-**压力位不是一条精确的价格线，而是一个价格区域。  
-该区域通常体现上方库存、事件锚定成本以及历史成交集中，并且在历史上曾表现出回落、冲高失败或收回上破的行为。  
-如果该区域同时出现在日线和周线中，则其作为压力区的可信度通常更高。**
-
-Resistance follows the same logic in reverse:
-
-**a resistance zone is an area where overhead inventory, anchored supply, and prior volume concentration overlap, and where historical price action has shown rejection, failed breakout, or reversal behaviour.  
-Its significance rises further when confirmed across both daily and weekly structure.**
-
----
-
-## 十二、方法的意义与局限 / Meaning and Current Limitations
-
-这套方法的最大价值在于，它把“支撑位”从一种简单画线行为，提升成一种更接近真实市场结构的分析框架。  
-它不再只关注：
-
-- 前低在哪里
-- 哪条趋势线好不好看
-
-而是开始关注：
-
-- 市场曾经在哪些区域大量交易
-- 关键事件后资金成本在哪里
-- 价格过去是否真的在这里反应过
-- 这个区域是否得到不同周期的共同确认
-
-The main value of this framework is that it elevates support/resistance from simple line-drawing into a more realistic structural model.  
-It focuses not only on prior lows or visual trendlines, but on:
-
-- where the market previously accepted price
-- where cost basis was anchored after important moves
-- whether price historically reacted there
-- whether the zone is confirmed across timeframes
-
-当然，这套方法仍然有局限：
-
-1. 当前的 anchor 仍主要来自价格行为代理，而非真正的事件数据  
-2. 反应验证仍是价格行为层面的近似，而非订单流层面的验证  
-3. 多周期目前主要集中在日线与周线，未来仍可扩展至月线或更细节的执行周期
-
-Of course, the method still has limitations:
-
-1. anchors are still mostly inferred from price action rather than true external event data
-2. reaction validation is still behavioural rather than order-flow-based
-3. multi-timeframe confluence is currently daily/weekly and could be extended further
-
----
-
-## 十三、最终总结 / Final Summary
-
-总的来说，这套支撑逻辑的目标，不是给出一根“绝对正确”的支撑线，  
-而是识别出那些最可能重新引发市场响应的区域。
-
-它通过以下方式实现这一目标：
-
-- 先用成交密集区识别市场曾经接受过的价格带  
-- 再用 Anchored VWAP 表示关键事件后的平均成本  
-- 再用库存逻辑区分支撑与压力  
-- 再加入日线与周线的多周期共振  
-- 最后通过历史反应验证，提高区域的可信度
-
-因此，这套支撑位系统真正表达的是：
-
-**不是价格到了某一个点一定反弹，  
-而是这些区域更有可能成为市场重新平衡、重新响应、重新定价的位置。**
-
-In the end, this framework does not try to produce one perfect line.  
-Instead, it aims to identify the zones most likely to matter again.
-
-It does so by combining:
-
-- volume-based market acceptance
-- anchored cost basis
-- inventory structure
-- multi-timeframe confirmation
-- historical reaction evidence
-
-So the real message of the model is not:
-
-**price must reverse at this exact point**
-
-but rather:
-
-**these are the areas where renewed market response is most likely to occur.**
+### 推荐动作
+- 并更新 PRD / 配置注释

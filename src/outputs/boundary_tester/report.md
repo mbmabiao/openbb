@@ -1,87 +1,97 @@
 # Boundary Tester Report
 
 ## Data Overview
-- Raw interactions: 254
-- Breakout labeled events: 180
-- Defense labeled events: 180
-- Structural zones: 374
+- Raw interactions: 963
+- Breakout labeled events: 702
+- Defense labeled events: 702
+- Structural zones: 1466
 
 ## Zone Defense Summary
-- Hold Rate: 8.20%
-- Failed Hold Rate: 91.80%
-- Unresolved Rate: 0.00%
-- Avg Reversal Strength: 6.18%
+- Hold Rate: 8.21%
+- Failed Hold Rate: 90.65%
+- Unresolved Rate: 1.15%
+- Avg Reversal Strength: 7.53%
 
 ### Defense By Touch Count
 ```json
 {
   "first_touch": {
-    "avg_reversal_strength": 0.05965654804671635,
-    "avg_zone_defense_score": 2.4964935414307936,
-    "count": 85,
-    "failed_hold_rate": 0.9294117647058824,
-    "hold_rate": 0.07058823529411765,
-    "unresolved_rate": 0.0
+    "avg_reversal_strength": 0.07800158393357906,
+    "avg_zone_defense_score": 2.68339235613189,
+    "count": 354,
+    "failed_hold_rate": 0.8870056497175142,
+    "hold_rate": 0.096045197740113,
+    "unresolved_rate": 0.01694915254237288
   },
   "second_touch": {
-    "avg_reversal_strength": 0.06670216098692607,
-    "avg_zone_defense_score": 2.4755747300282875,
-    "count": 37,
-    "failed_hold_rate": 0.8918918918918919,
-    "hold_rate": 0.10810810810810811,
+    "avg_reversal_strength": 0.06960239831613461,
+    "avg_zone_defense_score": 1.8810712262978635,
+    "count": 170,
+    "failed_hold_rate": 0.9470588235294117,
+    "hold_rate": 0.052941176470588235,
     "unresolved_rate": 0.0
   }
 }
 ```
 
 ## Breakout Continuation Summary
-- Success Rate: 55.00%
-- Failure Rate: 40.00%
-- False Breakout Rate: 35.00%
-- Failed Follow Through Rate: 0.00%
-- Hold Rate After Breakout: 87.50%
+- Success Rate: 54.81%
+- Failure Rate: 41.48%
+- False Breakout Rate: 37.04%
+- Failed Follow Through Rate: 1.48%
+- Hold Rate After Breakout: 89.63%
 - Event Per Structural Zone: 1.00
 
 ### Breakout By Failure Subtype
 ```json
 {
+  "failed_follow_through": {
+    "avg_follow_through": -0.06679373057157395,
+    "count": 2,
+    "failed_follow_through_rate": 1.0,
+    "failure_rate": 1.0,
+    "false_breakout_rate": 0.0,
+    "median_follow_through": -0.06679373057157395,
+    "success_rate": 0.0,
+    "unresolved_rate": 0.0
+  },
   "fast_false_breakout": {
-    "avg_follow_through": -0.04785029143126742,
-    "count": 14,
+    "avg_follow_through": -0.04890732670438281,
+    "count": 50,
     "failed_follow_through_rate": 0.0,
     "failure_rate": 1.0,
     "false_breakout_rate": 1.0,
-    "median_follow_through": -0.05176231586226952,
+    "median_follow_through": -0.04159477476086082,
     "success_rate": 0.0,
     "unresolved_rate": 0.0
   },
   "late_failure": {
-    "avg_follow_through": 0.004393051384034646,
-    "count": 2,
+    "avg_follow_through": -0.13217279625086323,
+    "count": 4,
     "failed_follow_through_rate": 0.0,
     "failure_rate": 1.0,
     "false_breakout_rate": 0.0,
-    "median_follow_through": 0.004393051384034646,
+    "median_follow_through": -0.08709337572465577,
     "success_rate": 0.0,
     "unresolved_rate": 0.0
   },
   "none": {
-    "avg_follow_through": 0.004072175080772494,
-    "count": 22,
+    "avg_follow_through": 0.03464582589843092,
+    "count": 74,
     "failed_follow_through_rate": 0.0,
     "failure_rate": 0.0,
     "false_breakout_rate": 0.0,
-    "median_follow_through": 0.011865088494033232,
+    "median_follow_through": 0.026497309314366585,
     "success_rate": 1.0,
     "unresolved_rate": 0.0
   },
   "unresolved": {
-    "avg_follow_through": 0.014176540921013156,
-    "count": 2,
+    "avg_follow_through": 0.018003173909950664,
+    "count": 5,
     "failed_follow_through_rate": 0.0,
     "failure_rate": 0.0,
     "false_breakout_rate": 0.0,
-    "median_follow_through": 0.014176540921013156,
+    "median_follow_through": 0.010580833781037143,
     "success_rate": 0.0,
     "unresolved_rate": 1.0
   }
@@ -92,14 +102,14 @@
 ```json
 {
   "second_touch": {
-    "avg_follow_through": -0.013579426091266337,
-    "count": 40,
-    "failed_follow_through_rate": 0.0,
-    "failure_rate": 0.4,
-    "false_breakout_rate": 0.35,
-    "median_follow_through": 0.0017817017747225712,
-    "success_rate": 0.55,
-    "unresolved_rate": 0.05
+    "avg_follow_through": -0.0033617629283859275,
+    "count": 135,
+    "failed_follow_through_rate": 0.014814814814814815,
+    "failure_rate": 0.4148148148148148,
+    "false_breakout_rate": 0.37037037037037035,
+    "median_follow_through": -0.007674795070072814,
+    "success_rate": 0.5481481481481482,
+    "unresolved_rate": 0.037037037037037035
   }
 }
 ```
