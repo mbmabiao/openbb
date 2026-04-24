@@ -112,14 +112,13 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             if not atr20_series.empty and pd.notna(atr20_series.iloc[-1])
             else np.nan
         )
+        df_calc_daily_with_features, daily_anchor_meta = build_avwap_features(df_calc_daily, timeframe="D")
         atr_overlay = _build_atr_overlay(
-            current_price=current_price,
-            atr20_value=atr20_value,
+            df_calc_daily_with_features=df_calc_daily_with_features,
+            atr20_series=atr20_series,
             show_atr_bands=controls.show_atr_bands,
             atr_multiplier=controls.atr_multiplier,
         )
-
-        df_calc_daily_with_features, daily_anchor_meta = build_avwap_features(df_calc_daily, timeframe="D")
         daily_vp_dates = get_recent_trading_dates(df_calc_daily, controls.vp_lookback_days)
         daily_vp_context = _load_interval_volume_profile_context(
             symbol=controls.symbol,
@@ -331,20 +330,35 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
 
 
 def _build_atr_overlay(
-    current_price: float,
-    atr20_value: float,
+    df_calc_daily_with_features: pd.DataFrame,
+    atr20_series: pd.Series,
     show_atr_bands: bool,
     atr_multiplier: float,
 ) -> dict | None:
-    if not show_atr_bands or not np.isfinite(atr20_value):
+    if not show_atr_bands or df_calc_daily_with_features.empty or atr20_series.empty:
         return None
 
-    atr_distance = atr20_value * atr_multiplier
+    atr_frame = df_calc_daily_with_features.loc[:, ["date", "close"]].copy()
+    atr_frame["atr20"] = pd.to_numeric(atr20_series, errors="coerce")
+    atr_frame = atr_frame.dropna(subset=["date", "close", "atr20"]).copy()
+    if atr_frame.empty:
+        return None
+
+    atr_distance = atr_frame["atr20"] * atr_multiplier
+    atr_frame["upper"] = atr_frame["close"] + atr_distance
+    atr_frame["lower"] = atr_frame["close"] - atr_distance
+
     return {
-        "upper": current_price + atr_distance,
-        "lower": current_price - atr_distance,
         "label": f"ATR20x{atr_multiplier:.1f}",
         "color": "#6d28d9",
+        "upper_data": [
+            {"time": pd.Timestamp(row.date).strftime("%Y-%m-%d"), "value": float(row.upper)}
+            for row in atr_frame.itertuples(index=False)
+        ],
+        "lower_data": [
+            {"time": pd.Timestamp(row.date).strftime("%Y-%m-%d"), "value": float(row.lower)}
+            for row in atr_frame.itertuples(index=False)
+        ],
     }
 
 

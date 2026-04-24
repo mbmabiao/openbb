@@ -222,19 +222,28 @@ def build_lwc_series(
             )
 
         if atr_overlay is not None:
-            atr_upper = atr_overlay.get("upper")
-            atr_lower = atr_overlay.get("lower")
             atr_label = atr_overlay.get("label", "ATR20")
             atr_color = atr_overlay.get("color", "#7c3aed")
+            atr_upper_data = atr_overlay.get("upper_data") or []
+            atr_lower_data = atr_overlay.get("lower_data") or []
 
-            if atr_upper is not None:
+            if visible_start is not None and visible_end is not None:
+                atr_upper_data = [
+                    row
+                    for row in atr_upper_data
+                    if visible_start <= pd.to_datetime(row["time"]) <= visible_end
+                ]
+                atr_lower_data = [
+                    row
+                    for row in atr_lower_data
+                    if visible_start <= pd.to_datetime(row["time"]) <= visible_end
+                ]
+
+            if atr_upper_data:
                 series.append(
                     {
                         "type": "Line",
-                        "data": [
-                            {"time": start_time, "value": float(atr_upper)},
-                            {"time": end_time, "value": float(atr_upper)},
-                        ],
+                        "data": atr_upper_data,
                         "overlay_label": {
                             "text": f"{atr_label}+",
                             "color": atr_color,
@@ -249,14 +258,11 @@ def build_lwc_series(
                     }
                 )
 
-            if atr_lower is not None:
+            if atr_lower_data:
                 series.append(
                     {
                         "type": "Line",
-                        "data": [
-                            {"time": start_time, "value": float(atr_lower)},
-                            {"time": end_time, "value": float(atr_lower)},
-                        ],
+                        "data": atr_lower_data,
                         "overlay_label": {
                             "text": f"{atr_label}-",
                             "color": atr_color,
