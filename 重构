@@ -1,0 +1,564 @@
+```text
+结论：
+你现在就按一个工程化方案走。
+
+核心原则：
+app2.py 继续作为 Streamlit 入口；
+已经有的功能先拆出来；
+还没有的功能只预留位置，不要现在强行实现。
+
+============================================================
+当前版本工程化结构
+============================================================
+
+openbb_project/
+│
+├── app2.py
+│
+├── config/
+│   └── settings.py
+│
+├── src/
+│   ├── data/
+│   │   └── market_data.py
+│   │
+│   ├── features/
+│   │   ├── volume_profile.py
+│   │   └── boundaries.py
+│   │
+│   ├── engines/
+│   │   ├── replay_engine.py
+│   │   ├── breakout_engine.py
+│   │   └── validation_engine.py
+│   │
+│   ├── plotting/
+│   │   └── chart_builder.py
+│   │
+│   └── ui/
+│       ├── sidebar.py
+│       └── state.py
+│
+└── tests/
+    ├── test_volume_profile.py
+    ├── test_breakout_engine.py
+    └── test_validation_engine.py
+
+
+============================================================
+一、现在已经有的功能，应该怎么拆
+============================================================
+
+1. app2.py
+
+当前状态：
+你现在所有功能都在 app2.py 里。
+
+现在应该保留：
+- Streamlit 页面入口
+- 主流程组织
+- 页面渲染顺序
+- 调用各个模块
+
+现在不应该继续放在 app2.py 里的：
+- 行情数据请求
+- yfinance / OpenBB 参数处理
+- 5m / 15m 数据 fallback
+- 数据拼接
+- Volume Profile 计算
+- K 线图绘制细节
+- replay 数据截断逻辑
+- session_state 复杂逻辑
+
+app2.py 最终定位：
+它不是计算模块。
+它只是入口和流程调度器。
+
+
+------------------------------------------------------------
+
+2. config/settings.py
+
+当前应该放：
+- 默认 symbol
+- 默认 interval
+- 默认 provider
+- 默认 adjustment
+- 默认日期范围
+- 默认 replay 参数
+- 默认 Volume Profile 参数
+- 默认图表显示参数
+
+现在作用：
+把散落在 app2.py 里的默认参数集中管理。
+
+未来作用：
+以后如果你有多套策略参数、多市场配置、多数据源配置，可以继续扩展这里。
+
+
+------------------------------------------------------------
+
+3. src/data/market_data.py
+
+这是现在就应该拆的第一个模块。
+
+当前应该放：
+- OpenBB 数据请求
+- yfinance 数据请求
+- provider 参数选择
+- adjustment 参数修正
+- interval 参数处理
+- 5m 数据请求
+- 15m 数据请求
+- 5m 不可用时 fallback 到 15m
+- 分段请求
+- 拼接数据
+- 去重
+- 按时间排序
+- 基础数据清洗
+
+你之前遇到的这些问题，都应该集中放这里处理：
+- Invalid value 'unadjusted' for 'adjustment'
+- 5m history could not be loaded
+- No results found
+- replay window 下 intraday 数据不可用
+- 请求区间太长导致 yfinance 没有返回
+
+这个模块现在的目标：
+app2.py 不再关心数据怎么来的。
+app2.py 只拿到清洗好的 OHLCV 数据。
+
+
+------------------------------------------------------------
+
+4. src/features/volume_profile.py
+
+这是现在就应该拆的第二个模块。
+
+当前应该放：
+- Daily VP 计算
+- Weekly VP 计算
+- 当前 replay window 的 VP 计算
+- higher-timeframe VP 计算
+- price bins
+- volume distribution
+- POC
+- VAH
+- VAL
+
+注意：
+这个模块只负责计算 Volume Profile。
+不要在这里画图。
+不要在这里写 Streamlit。
+不要在这里处理按钮。
+
+现在目标：
+把 app2.py 里的 VP 计算逻辑全部迁出来。
+
+未来作用：
+以后 breakout engine 和 validation framework 都可以复用这些 VP 结果。
+
+
+------------------------------------------------------------
+
+5. src/plotting/chart_builder.py
+
+这是现在就应该拆的第三个模块。
+
+当前应该放：
+- K 线图构建
+- Volume Profile 图层
+- Daily VP 图层
+- Weekly VP 图层
+- boundary 线条
+- replay 可视范围
+- 图表默认显示范围
+- marker
+- hover 信息
+- 图表 layout 参数
+
+注意：
+这个模块只负责画图。
+不要在这里重新请求数据。
+不要在这里重新计算 VP。
+不要在这里判断 breakout 是否成立。
+
+现在目标：
+让 app2.py 不再堆满图表配置。
+
+
+------------------------------------------------------------
+
+6. src/engines/replay_engine.py
+
+这是现在就应该拆的模块，如果你当前已经有 replay 功能。
+
+当前应该放：
+- replay index
+- replay 当前 bar
+- replay 当前可见数据范围
+- replay 数据截断
+- replay window 计算
+- 根据当前 replay 时间决定能看到哪些历史数据
+
+注意：
+Streamlit 的按钮可以留在 UI 层。
+但真正的 replay 数据逻辑要放这里。
+
+现在目标：
+把“当前这一步能看到哪些 K 线”这件事独立出来。
+
+
+------------------------------------------------------------
+
+7. src/ui/sidebar.py
+
+这是现在可以拆，但优先级低于 data、VP、plotting。
+
+当前应该放：
+- symbol 输入
+- provider 选择
+- interval 选择
+- date range 选择
+- replay 开关
+- VP 参数
+- 图表显示参数
+
+现在目标：
+减少 app2.py 里的 Streamlit 控件代码。
+
+
+------------------------------------------------------------
+
+8. src/ui/state.py
+
+这是现在可以拆，但不要最先拆。
+
+当前应该放：
+- st.session_state 初始化
+- replay index 状态
+- symbol 切换后的状态重置
+- interval 切换后的状态重置
+- 图表可见范围状态
+- 缓存状态
+
+现在目标：
+避免 app2.py 到处直接操作 session_state。
+
+
+============================================================
+二、现在可能已经有一部分，但需要确认的功能
+============================================================
+
+9. src/features/boundaries.py
+
+如果你现在已经有支撑位、阻力位、VP 边界、成本区、复合区这些逻辑：
+现在就拆到这里。
+
+当前可以放：
+- POC boundary
+- VAH boundary
+- VAL boundary
+- previous high boundary
+- previous low boundary
+- cost zone boundary
+- composite zone boundary
+- support / resistance line
+
+如果你现在只是把这些线画在图上：
+也建议先抽象成 boundary 结果，再交给 chart_builder.py 去画。
+
+现在目标：
+边界不只是图上的线，而是结构化结果。
+
+未来作用：
+这个模块会发展成你的“可复用边界识别引擎”。
+
+
+------------------------------------------------------------
+
+10. src/engines/breakout_engine.py
+
+如果你现在已经有突破判断：
+现在就拆到这里。
+
+当前可以放：
+- 价格突破某个 boundary
+- close 确认突破
+- volume 确认突破
+- 假突破标记
+- failed follow-through 标记
+- breakout direction
+- breakout timestamp
+
+如果你现在只是人工看图，还没有自动 breakout detection：
+那这个文件先创建，但里面暂时只放最基础的接口或 TODO。
+不要现在强行写复杂逻辑。
+
+现在目标：
+如果已有突破逻辑，就迁出来。
+如果没有，就预留。
+
+未来作用：
+这个模块会发展成你的“可复用 breakout event engine”。
+
+
+------------------------------------------------------------
+
+11. src/engines/validation_engine.py
+
+如果你现在已经有事件统计结果：
+现在就拆到这里。
+
+你之前已经出现过这些指标：
+- success_rate
+- failure_rate
+- unresolved_rate
+- false_breakout_rate
+- failed_follow_through_rate
+- avg_follow_through
+- avg_mfe
+- avg_mae
+- by_zone_class
+
+如果这些统计现在已经在 app2.py 或 notebook 里：
+就应该迁到 validation_engine.py。
+
+如果你现在还没有完整事件级 validation：
+那这个文件先负责 summary 统计。
+后面再扩展到事件级验证。
+
+现在目标：
+把成功率、失败率、MFE、MAE 这些验证统计从 UI 中分离。
+
+未来作用：
+这个模块会发展成你的“可复用 validation framework”。
+
+
+============================================================
+三、明确属于未来设计的部分
+============================================================
+
+这些不是你现在必须完成的。
+
+1. 可复用边界识别引擎
+
+未来目标：
+把所有边界来源统一成标准结构。
+
+未来会支持：
+- swing high / swing low
+- volume profile levels
+- cost zone
+- composite zone
+- previous session high / low
+- higher timeframe boundary
+- boundary strength scoring
+
+现在只需要：
+如果你已经有某些边界，就先放进 boundaries.py。
+不要现在强行做完整评分系统。
+
+
+------------------------------------------------------------
+
+2. 可复用 breakout event engine
+
+未来目标：
+自动识别、记录、分类 breakout event。
+
+未来会支持：
+- close breakout
+- wick breakout
+- volume confirmed breakout
+- retest breakout
+- failed breakout
+- false breakout
+- failed follow-through
+- breakout quality score
+
+现在只需要：
+如果你已经有突破判断，就迁到 breakout_engine.py。
+如果没有，就先预留模块。
+
+
+------------------------------------------------------------
+
+3. 可复用 validation framework
+
+未来目标：
+对每个 breakout event 做标准化验证。
+
+未来会支持：
+- event-level validation
+- MFE
+- MAE
+- forward return
+- success / failure / unresolved
+- by boundary type
+- by zone class
+- by time period
+- by volume condition
+- by market regime
+
+现在只需要：
+把你已有的 success_rate、failure_rate、false_breakout_rate、MFE、MAE 统计独立出来。
+
+
+------------------------------------------------------------
+
+4. 可复用 alpha research module
+
+未来目标：
+把事件和验证结果转成研究框架。
+
+未来会支持：
+- 哪类 breakout 最有效
+- 哪类 boundary 最有效
+- 哪个时间段更容易成功
+- 哪种 VP 结构更有效
+- 参数敏感性分析
+- 策略假设验证
+- 批量 symbol 回测分析
+
+现在不建议创建复杂 alpha research 模块。
+
+现在只需要：
+把 validation_engine.py 的输出设计得干净一点，方便以后复用。
+
+
+============================================================
+四、你现在应该按什么顺序改
+============================================================
+
+只按这个顺序改。
+
+第一步：
+拆 src/data/market_data.py
+
+原因：
+你现在最现实的问题是数据请求和 fallback。
+先把数据源逻辑稳定下来。
+
+
+第二步：
+拆 src/features/volume_profile.py
+
+原因：
+VP 是你当前系统的核心特征。
+它不应该继续留在 app2.py。
+
+
+第三步：
+拆 src/plotting/chart_builder.py
+
+原因：
+图表代码通常很长。
+拆出去以后，app2.py 会立刻变清楚。
+
+
+第四步：
+拆 src/engines/replay_engine.py
+
+原因：
+你现在有 replay 逻辑。
+replay 应该是数据窗口逻辑，不应该散落在 UI 里。
+
+
+第五步：
+拆 src/features/boundaries.py
+
+原因：
+这一步开始为未来边界识别引擎做准备。
+但只迁移你现在已经有的边界逻辑。
+
+
+第六步：
+拆 src/engines/breakout_engine.py
+
+原因：
+如果你现在已经有 breakout 判断，就迁移。
+如果没有，只预留文件，不强行实现。
+
+
+第七步：
+拆 src/engines/validation_engine.py
+
+原因：
+如果你现在已经有 success_rate、false_breakout_rate、MFE、MAE，就迁移。
+如果没有，先放未来 TODO。
+
+
+第八步：
+拆 src/ui/sidebar.py 和 src/ui/state.py
+
+原因：
+UI 拆分最后做。
+先让核心逻辑从 app2.py 里出去。
+
+
+============================================================
+五、最终 app2.py 应该是什么角色
+============================================================
+
+app2.py 最终只应该表达这个流程：
+
+1. 读取 UI 参数
+2. 加载行情数据
+3. 根据 replay 状态截断数据
+4. 计算 Volume Profile
+5. 识别当前已有的边界
+6. 如果已有 breakout 逻辑，就检测 breakout
+7. 如果已有 validation 逻辑，就计算 validation
+8. 构建图表
+9. 展示图表和统计结果
+
+app2.py 不再承担：
+- 数据源细节
+- VP 算法
+- boundary 算法
+- breakout 算法
+- validation 算法
+- 图表细节
+- 复杂 session_state 逻辑
+
+
+============================================================
+六、最重要的边界
+============================================================
+
+现在就做：
+- data/market_data.py
+- features/volume_profile.py
+- plotting/chart_builder.py
+- replay_engine.py
+- sidebar.py
+- state.py
+
+如果已有就迁移：
+- features/boundaries.py
+- engines/breakout_engine.py
+- engines/validation_engine.py
+
+未来再增强：
+- boundary strength scoring
+- breakout quality scoring
+- event-level validation framework
+- alpha research module
+- batch backtesting
+- 参数敏感性分析
+
+
+============================================================
+一句话
+============================================================
+
+你现在不是要重写系统。
+你只是要把 app2.py 里的现有功能按职责拆开：
+
+data 负责数据；
+features 负责特征；
+engines 负责事件和验证；
+plotting 负责画图；
+ui 负责交互；
+app2.py 只负责串流程。
+```

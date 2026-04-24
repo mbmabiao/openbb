@@ -1,0 +1,66 @@
+A. 保留现有文件做 UI shell
+
+当前这个 Streamlit 文件继续做：
+
+sidebar 参数
+replay date 控件
+chart page
+table page
+metrics page
+
+不要让它继续承载所有结构逻辑。
+
+B. 拆出 4 个独立模块
+
+我建议最少拆成这 4 个文件：
+
+1. zone_engine.py
+
+保留/迁移你现有这些函数：
+
+build_avwap_features
+build_composite_interval_volume_profile_zones
+create_candidate_zones_from_avwap
+create_candidate_zones_from_vp
+merge_close_zones
+rank_zones_for_side
+validate_zone_reaction
+
+也就是：“发现候选区 + 静态评分”
+
+2. zone_structure.py
+
+新建，专门负责：
+
+Zone dataclass
+ZoneRegistry
+match_zones()
+update_registry_from_candidates()
+detect_pending_breakouts()
+confirm_breakout()
+create_flipped_zone()
+process_retest()
+build_structure_output()
+
+也就是：“身份延续 + 状态机”
+
+3. zone_visuals.py
+
+新建，专门负责：
+
+zone 转 chart overlay
+zone label 样式
+状态颜色映射
+markers / bands / shaded box
+left panel 展示卡片
+
+也就是：“结构对象怎么画”
+
+4. dashboard_page.py
+
+当前主文件里的 show_price_chart() 可以逐步简化成 orchestration：
+
+fetch data
+build candidates
+update structure
+render visuals
