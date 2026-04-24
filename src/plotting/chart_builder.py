@@ -45,6 +45,35 @@ def to_lwc_time(value) -> str:
     return pd.to_datetime(value).strftime("%Y-%m-%d")
 
 
+def build_volume_profile_overlay_data(profile_df: pd.DataFrame) -> list[dict]:
+    required_columns = {"bin_left", "bin_right", "bin_center", "volume"}
+    if profile_df.empty or not required_columns.issubset(profile_df.columns):
+        return []
+
+    overlay_df = profile_df.loc[:, ["bin_left", "bin_right", "bin_center", "volume"]].copy()
+    for column in overlay_df.columns:
+        overlay_df[column] = pd.to_numeric(overlay_df[column], errors="coerce")
+    overlay_df = overlay_df.dropna(subset=["bin_left", "bin_right", "bin_center", "volume"]).copy()
+    overlay_df = overlay_df.loc[overlay_df["volume"] > 0].copy()
+    if overlay_df.empty:
+        return []
+
+    max_volume = float(overlay_df["volume"].max())
+    overlay_df["is_poc"] = overlay_df["volume"] >= max_volume
+    overlay_df = overlay_df.sort_values("bin_center", kind="stable").reset_index(drop=True)
+
+    return [
+        {
+            "bin_left": float(row.bin_left),
+            "bin_right": float(row.bin_right),
+            "bin_center": float(row.bin_center),
+            "volume": float(row.volume),
+            "is_poc": bool(row.is_poc),
+        }
+        for row in overlay_df.itertuples(index=False)
+    ]
+
+
 def build_lwc_series(
     df_plot: pd.DataFrame,
     df_calc_daily_with_features: pd.DataFrame,
@@ -249,15 +278,24 @@ def render_lwc_chart_with_focus_header(
     chart_options: dict,
     series: list[dict],
     chart_key: str,
+    volume_profile_data: list[dict] | None = None,
 ):
     chart_height = int(chart_options.get("height", 700))
     container_id = f"lwc-chart-{abs(hash(chart_key))}"
-    payload = json.dumps({"chart": chart_options, "series": series}, ensure_ascii=False)
+    payload = json.dumps(
+        {
+            "chart": chart_options,
+            "series": series,
+            "volumeProfile": volume_profile_data or [],
+        },
+        ensure_ascii=False,
+    )
 
     html = f"""
 <div id="{container_id}" class="lwc-wrap">
   <div id="{container_id}-header" class="lwc-header"></div>
   <div id="{container_id}-zone-labels" class="lwc-zone-labels"></div>
+  <div id="{container_id}-volume-profile" class="lwc-volume-profile"></div>
   <div id="{container_id}-chart" class="lwc-chart"></div>
 </div>
 
@@ -289,6 +327,13 @@ def render_lwc_chart_with_focus_header(
     pointer-events: none;
   }}
 
+  .lwc-volume-profile {{
+    position: absolute;
+    inset: 0;
+    z-index: 8;
+    pointer-events: none;
+  }}
+
   .lwc-zone-label {{
     position: absolute;
     left: 8px;
@@ -301,6 +346,36 @@ def render_lwc_chart_with_focus_header(
     font-weight: 700;
     line-height: 1.2;
     box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+    white-space: nowrap;
+  }}
+
+  .lwc-volume-profile-bar {{
+    position: absolute;
+    right: 76px;
+    border-radius: 999px 0 0 999px;
+    background: rgba(59, 130, 246, 0.22);
+    border: 1px solid rgba(59, 130, 246, 0.35);
+    box-sizing: border-box;
+  }}
+
+  .lwc-volume-profile-bar.poc {{
+    background: rgba(245, 158, 11, 0.42);
+    border-color: rgba(245, 158, 11, 0.75);
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.2);
+  }}
+
+  .lwc-volume-profile-tag {{
+    position: absolute;
+    right: 76px;
+    transform: translateY(-50%);
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid rgba(245, 158, 11, 0.75);
+    color: #92400e;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1.2;
     white-space: nowrap;
   }}
 
@@ -354,6 +429,7 @@ def render_lwc_chart_with_focus_header(
   const root = document.getElementById("{container_id}");
   const header = document.getElementById("{container_id}-header");
   const zoneLabels = document.getElementById("{container_id}-zone-labels");
+  const volumeProfile = document.getElementById("{container_id}-volume-profile");
   const chartNode = document.getElementById("{container_id}-chart");
 
   const normalizeTime = (value) => {{
@@ -413,6 +489,7 @@ def render_lwc_chart_with_focus_header(
   }};
 
   let candleData = [];
+  let primaryPriceSeries = null;
   const candleLookup = new Map();
   const zoneLabelSeries = [];
 
@@ -444,6 +521,7 @@ def render_lwc_chart_with_focus_header(
 
     if (item.type === "Candlestick" && candleData.length === 0) {{
       candleData = item.data || [];
+      primaryPriceSeries = createdSeries;
       candleData.forEach((bar) => {{
         candleLookup.set(normalizeTime(bar.time), bar);
       }});
@@ -498,6 +576,62 @@ def render_lwc_chart_with_focus_header(
     }});
   }};
 
+  const renderVolumeProfile = () => {{
+    if (!volumeProfile) {{
+      return;
+    }}
+
+    volumeProfile.innerHTML = "";
+
+    const profileRows = payload.volumeProfile || [];
+    if (!profileRows.length || !primaryPriceSeries) {{
+      return;
+    }}
+
+    const chartWidth = chartNode.clientWidth || root.clientWidth || 900;
+    const profileWidth = Math.max(Math.min(chartWidth * 0.18, 180), 72);
+    const maxVolume = Math.max(
+      ...profileRows.map((row) => Number(row.volume)).filter((value) => Number.isFinite(value)),
+      0
+    );
+
+    if (!(maxVolume > 0)) {{
+      return;
+    }}
+
+    profileRows.forEach((row) => {{
+      const topY = primaryPriceSeries.priceToCoordinate(Number(row.bin_right));
+      const bottomY = primaryPriceSeries.priceToCoordinate(Number(row.bin_left));
+      const centerY = primaryPriceSeries.priceToCoordinate(Number(row.bin_center));
+      const volume = Number(row.volume);
+
+      if (![topY, bottomY, centerY, volume].every((value) => Number.isFinite(value))) {{
+        return;
+      }}
+
+      const top = Math.min(topY, bottomY);
+      const rawHeight = Math.abs(bottomY - topY);
+      const height = Math.max(rawHeight - 1, 3);
+      const width = Math.max((volume / maxVolume) * profileWidth, 2);
+
+      const bar = document.createElement("div");
+      bar.className = `lwc-volume-profile-bar${{row.is_poc ? " poc" : ""}}`;
+      bar.style.top = `${{top}}px`;
+      bar.style.width = `${{width}}px`;
+      bar.style.height = `${{height}}px`;
+      volumeProfile.appendChild(bar);
+
+      if (row.is_poc) {{
+        const tag = document.createElement("div");
+        tag.className = "lwc-volume-profile-tag";
+        tag.textContent = "POC";
+        tag.style.top = `${{centerY}}px`;
+        tag.style.transform = `translate(-${{Math.min(width + 8, profileWidth + 8)}}px, -50%)`;
+        volumeProfile.appendChild(tag);
+      }}
+    }});
+  }};
+
   chart.subscribeCrosshairMove((param) => {{
     const timeKey = normalizeTime(param?.time);
     if (!timeKey) {{
@@ -509,11 +643,13 @@ def render_lwc_chart_with_focus_header(
 
   chart.timeScale().fitContent();
   renderZoneLabels();
+  renderVolumeProfile();
 
   const applyWidth = () => {{
     const width = root.clientWidth || 900;
     chart.applyOptions({{ width }});
     renderZoneLabels();
+    renderVolumeProfile();
   }};
 
   const resizeObserver = new ResizeObserver(() => {{
@@ -522,7 +658,11 @@ def render_lwc_chart_with_focus_header(
 
   resizeObserver.observe(root);
   window.addEventListener("resize", applyWidth);
-  chart.timeScale().subscribeVisibleTimeRangeChange(renderZoneLabels);
+  chart.timeScale().subscribeVisibleTimeRangeChange(() => {{
+    renderZoneLabels();
+    renderVolumeProfile();
+  }});
+  window.setInterval(renderVolumeProfile, 500);
 </script>
 """
 

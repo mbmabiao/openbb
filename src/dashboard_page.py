@@ -30,6 +30,7 @@ from features.volume_profile import (
     resample_to_weekly,
 )
 from plotting.chart_builder import (
+    build_volume_profile_overlay_data,
     build_chart_options,
     build_lwc_series,
     render_lwc_chart_with_focus_header,
@@ -245,6 +246,7 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
                 chart_options=build_chart_options(),
                 series=chart_series,
                 chart_key=f"lwc_{controls.symbol}_{pd.Timestamp(replay_date).strftime('%Y%m%d')}",
+                volume_profile_data=build_volume_profile_overlay_data(daily_vp_context.profile_df),
             )
 
         st.caption(f"Daily VP mode: {daily_vp_context.mode}. {daily_vp_context.note}")
