@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -50,16 +51,40 @@ def build_volume_profile_overlay_data(profile_df: pd.DataFrame) -> list[dict]:
     if profile_df.empty or not required_columns.issubset(profile_df.columns):
         return []
 
-    overlay_df = profile_df.loc[:, ["bin_left", "bin_right", "bin_center", "volume"]].copy()
+    selected_columns = ["bin_left", "bin_right", "bin_center", "volume"]
+    if "buy_volume" in profile_df.columns:
+        selected_columns.append("buy_volume")
+    if "sell_volume" in profile_df.columns:
+        selected_columns.append("sell_volume")
+
+    overlay_df = profile_df.loc[:, selected_columns].copy()
     for column in overlay_df.columns:
         overlay_df[column] = pd.to_numeric(overlay_df[column], errors="coerce")
+
+    if "buy_volume" not in overlay_df.columns:
+        overlay_df["buy_volume"] = 0.0
+    if "sell_volume" not in overlay_df.columns:
+        overlay_df["sell_volume"] = overlay_df["volume"]
+
+    overlay_df["buy_volume"] = overlay_df["buy_volume"].fillna(0.0)
+    overlay_df["sell_volume"] = overlay_df["sell_volume"].fillna(0.0)
+    overlay_df["volume"] = overlay_df["buy_volume"] + overlay_df["sell_volume"]
     overlay_df = overlay_df.dropna(subset=["bin_left", "bin_right", "bin_center", "volume"]).copy()
     overlay_df = overlay_df.loc[overlay_df["volume"] > 0].copy()
     if overlay_df.empty:
         return []
 
     max_volume = float(overlay_df["volume"].max())
+    total_volume = float(overlay_df["volume"].sum())
     overlay_df["is_poc"] = overlay_df["volume"] >= max_volume
+    overlay_df["concentration_pct"] = (
+        (overlay_df["volume"] / total_volume) * 100.0 if total_volume > 0 else 0.0
+    )
+    overlay_df["buy_share_pct"] = np.where(
+        overlay_df["volume"] > 0,
+        (overlay_df["buy_volume"] / overlay_df["volume"]) * 100.0,
+        0.0,
+    )
     overlay_df = overlay_df.sort_values("bin_center", kind="stable").reset_index(drop=True)
 
     return [
@@ -68,7 +93,11 @@ def build_volume_profile_overlay_data(profile_df: pd.DataFrame) -> list[dict]:
             "bin_right": float(row.bin_right),
             "bin_center": float(row.bin_center),
             "volume": float(row.volume),
+            "buy_volume": float(row.buy_volume),
+            "sell_volume": float(row.sell_volume),
             "is_poc": bool(row.is_poc),
+            "concentration_pct": int(round(float(row.concentration_pct))),
+            "buy_share_pct": int(round(float(row.buy_share_pct))),
         }
         for row in overlay_df.itertuples(index=False)
     ]
@@ -301,6 +330,7 @@ def render_lwc_chart_with_focus_header(
 <div id="{container_id}" class="lwc-wrap">
   <div id="{container_id}-header" class="lwc-header"></div>
   <div id="{container_id}-zone-labels" class="lwc-zone-labels"></div>
+  <div id="{container_id}-volume-profile-panel" class="lwc-volume-profile-panel"></div>
   <div id="{container_id}-volume-profile" class="lwc-volume-profile"></div>
   <div id="{container_id}-chart" class="lwc-chart"></div>
 </div>
@@ -340,6 +370,25 @@ def render_lwc_chart_with_focus_header(
     pointer-events: none;
   }}
 
+  .lwc-volume-profile-panel {{
+    position: absolute;
+    top: 0;
+    right: 64px;
+    bottom: 0;
+    width: 196px;
+    z-index: 7;
+    pointer-events: none;
+    background:
+      linear-gradient(
+        to right,
+        rgba(148, 163, 184, 0.10) 0,
+        rgba(148, 163, 184, 0.10) 1px,
+        rgba(248, 250, 252, 0.96) 1px,
+        rgba(248, 250, 252, 0.96) 100%
+      );
+    border-left: 1px solid rgba(148, 163, 184, 0.14);
+  }}
+
   .lwc-zone-label {{
     position: absolute;
     left: 8px;
@@ -358,16 +407,30 @@ def render_lwc_chart_with_focus_header(
   .lwc-volume-profile-bar {{
     position: absolute;
     right: 76px;
+    display: flex;
+    flex-direction: row;
+    overflow: hidden;
     border-radius: 999px 0 0 999px;
-    background: rgba(59, 130, 246, 0.22);
-    border: 1px solid rgba(59, 130, 246, 0.35);
+    background: rgba(248, 250, 252, 0.35);
+    border: 1px solid rgba(148, 163, 184, 0.35);
     box-sizing: border-box;
   }}
 
   .lwc-volume-profile-bar.poc {{
-    background: rgba(245, 158, 11, 0.42);
     border-color: rgba(245, 158, 11, 0.75);
     box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.2);
+  }}
+
+  .lwc-volume-profile-segment {{
+    height: 100%;
+  }}
+
+  .lwc-volume-profile-segment.buy {{
+    background: rgba(220, 38, 38, 0.62);
+  }}
+
+  .lwc-volume-profile-segment.sell {{
+    background: rgba(21, 128, 61, 0.62);
   }}
 
   .lwc-volume-profile-tag {{
@@ -435,6 +498,7 @@ def render_lwc_chart_with_focus_header(
   const root = document.getElementById("{container_id}");
   const header = document.getElementById("{container_id}-header");
   const zoneLabels = document.getElementById("{container_id}-zone-labels");
+  const volumeProfilePanel = document.getElementById("{container_id}-volume-profile-panel");
   const volumeProfile = document.getElementById("{container_id}-volume-profile");
   const chartNode = document.getElementById("{container_id}-chart");
 
@@ -595,7 +659,15 @@ def render_lwc_chart_with_focus_header(
     }}
 
     const chartWidth = chartNode.clientWidth || root.clientWidth || 900;
-    const profileWidth = Math.max(Math.min(chartWidth * 0.18, 180), 72);
+    const profilePanelWidth = Math.max(Math.min(chartWidth * 0.2, 196), 108);
+    const profileWidth = Math.max(profilePanelWidth - 18, 72);
+    const profilePanelRightOffset = 64;
+
+    if (volumeProfilePanel) {{
+      volumeProfilePanel.style.right = `${{profilePanelRightOffset}}px`;
+      volumeProfilePanel.style.width = `${{profilePanelWidth}}px`;
+    }}
+
     const maxVolume = Math.max(
       ...profileRows.map((row) => Number(row.volume)).filter((value) => Number.isFinite(value)),
       0
@@ -610,8 +682,10 @@ def render_lwc_chart_with_focus_header(
       const bottomY = primaryPriceSeries.priceToCoordinate(Number(row.bin_left));
       const centerY = primaryPriceSeries.priceToCoordinate(Number(row.bin_center));
       const volume = Number(row.volume);
+      const buyVolume = Number(row.buy_volume);
+      const sellVolume = Number(row.sell_volume);
 
-      if (![topY, bottomY, centerY, volume].every((value) => Number.isFinite(value))) {{
+      if (![topY, bottomY, centerY, volume, buyVolume, sellVolume].every((value) => Number.isFinite(value))) {{
         return;
       }}
 
@@ -619,19 +693,47 @@ def render_lwc_chart_with_focus_header(
       const rawHeight = Math.abs(bottomY - topY);
       const height = Math.max(rawHeight - 1, 3);
       const width = Math.max((volume / maxVolume) * profileWidth, 2);
+      const buyRatio = volume > 0 ? Math.max(Math.min(buyVolume / volume, 1), 0) : 0;
+      const buyWidth = width * buyRatio;
+      const sellWidth = Math.max(width - buyWidth, 0);
 
       const bar = document.createElement("div");
       bar.className = `lwc-volume-profile-bar${{row.is_poc ? " poc" : ""}}`;
       bar.style.top = `${{top}}px`;
       bar.style.width = `${{width}}px`;
       bar.style.height = `${{height}}px`;
+      bar.style.right = `${{profilePanelRightOffset + 12}}px`;
+
+      if (buyWidth > 0) {{
+        const buySegment = document.createElement("div");
+        buySegment.className = "lwc-volume-profile-segment buy";
+        buySegment.style.width = `${{buyWidth}}px`;
+        bar.appendChild(buySegment);
+      }}
+
+      if (sellWidth > 0) {{
+        const sellSegment = document.createElement("div");
+        sellSegment.className = "lwc-volume-profile-segment sell";
+        sellSegment.style.width = `${{sellWidth}}px`;
+        bar.appendChild(sellSegment);
+      }}
+
       volumeProfile.appendChild(bar);
 
       if (row.is_poc) {{
         const tag = document.createElement("div");
         tag.className = "lwc-volume-profile-tag";
-        tag.textContent = "POC";
+        const concentrationText = Number.isFinite(Number(row.concentration_pct))
+          ? `${{Math.round(Number(row.concentration_pct))}}%`
+          : "";
+        const buyShareText = Number.isFinite(Number(row.buy_share_pct))
+          ? ` buy ${{Math.round(Number(row.buy_share_pct))}}%`
+          : "";
+        tag.textContent = concentrationText
+          ? `POC ${{concentrationText}}${{buyShareText}}`
+          : `POC${{buyShareText}}`;
         tag.style.top = `${{centerY}}px`;
+        tag.style.right = `${{profilePanelRightOffset + 12}}px`;
         tag.style.transform = `translate(-${{Math.min(width + 8, profileWidth + 8)}}px, -50%)`;
         volumeProfile.appendChild(tag);
       }}
@@ -651,9 +753,30 @@ def render_lwc_chart_with_focus_header(
   renderZoneLabels();
   renderVolumeProfile();
 
+  const applyRightOffsetForProfile = () => {{
+    const timeScaleOptions = payload.chart?.timeScale || {{}};
+    const chartWidth = chartNode.clientWidth || root.clientWidth || 900;
+    const profilePanelWidth = Math.max(Math.min(chartWidth * 0.2, 196), 108);
+    const dividerPadding = 20;
+    const barSpacing = Number(timeScaleOptions.barSpacing) || 12;
+    const baseRightOffset = Number(timeScaleOptions.rightOffset) || 0;
+    const profileRightOffset = Math.ceil((profilePanelWidth + dividerPadding) / Math.max(barSpacing, 1));
+
+    chart.applyOptions({{
+      timeScale: {{
+        ...timeScaleOptions,
+        rightOffset: Math.max(baseRightOffset, profileRightOffset),
+      }},
+    }});
+  }};
+
+  applyRightOffsetForProfile();
+  chart.timeScale().fitContent();
+
   const applyWidth = () => {{
     const width = root.clientWidth || 900;
     chart.applyOptions({{ width }});
+    applyRightOffsetForProfile();
     renderZoneLabels();
     renderVolumeProfile();
   }};

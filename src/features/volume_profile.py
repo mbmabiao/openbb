@@ -198,17 +198,30 @@ def build_composite_interval_volume_profile_zones(
     bin_right = bin_edges[1:]
     bin_centers = (bin_left + bin_right) / 2.0
     volume_bins = np.zeros(bins, dtype=float)
+    buy_volume_bins = np.zeros(bins, dtype=float)
+    sell_volume_bins = np.zeros(bins, dtype=float)
 
     for row in source.itertuples(index=False):
         low = float(row.low)
         high = float(row.high)
         volume = float(row.volume)
+        open_price = float(row.open)
+        close_price = float(row.close)
 
-        if not np.isfinite(low) or not np.isfinite(high) or not np.isfinite(volume) or volume <= 0:
+        if (
+            not np.isfinite(low)
+            or not np.isfinite(high)
+            or not np.isfinite(volume)
+            or not np.isfinite(open_price)
+            or not np.isfinite(close_price)
+            or volume <= 0
+        ):
             continue
 
         if high < low:
             low, high = high, low
+
+        is_buy_bar = close_price >= open_price
 
         low = min(max(low, low_min), high_max)
         high = min(max(high, low_min), high_max)
@@ -217,6 +230,10 @@ def build_composite_interval_volume_profile_zones(
             index = int(np.searchsorted(bin_edges, low, side="right") - 1)
             index = int(np.clip(index, 0, bins - 1))
             volume_bins[index] += volume
+            if is_buy_bar:
+                buy_volume_bins[index] += volume
+            else:
+                sell_volume_bins[index] += volume
             continue
 
         overlap_left = np.maximum(bin_left, low)
@@ -228,9 +245,18 @@ def build_composite_interval_volume_profile_zones(
             index = int(np.searchsorted(bin_edges, low, side="right") - 1)
             index = int(np.clip(index, 0, bins - 1))
             volume_bins[index] += volume
+            if is_buy_bar:
+                buy_volume_bins[index] += volume
+            else:
+                sell_volume_bins[index] += volume
             continue
 
-        volume_bins += volume * (overlaps / total_overlap)
+        distributed_volume = volume * (overlaps / total_overlap)
+        volume_bins += distributed_volume
+        if is_buy_bar:
+            buy_volume_bins += distributed_volume
+        else:
+            sell_volume_bins += distributed_volume
 
     profile_df = pd.DataFrame(
         {
@@ -238,6 +264,8 @@ def build_composite_interval_volume_profile_zones(
             "bin_right": bin_right,
             "bin_center": bin_centers,
             "volume": volume_bins,
+            "buy_volume": buy_volume_bins,
+            "sell_volume": sell_volume_bins,
             "timeframe": timeframe,
             "source_bars": len(source),
             "source_mode": source_mode,
@@ -254,7 +282,7 @@ def build_composite_interval_volume_profile_zones(
 
 
 def build_avwap_features(df: pd.DataFrame, timeframe: str) -> tuple[pd.DataFrame, dict]:
-    recent_window_cap = 126 if timeframe == "D" else 52
+    recent_window_cap = 126 if timeframe == "D" else 60
     anchors = find_anchor_points(df, recent_window_cap=recent_window_cap)
     avwap_columns: dict[str, pd.Series] = {}
     anchor_meta: dict[str, dict] = {}

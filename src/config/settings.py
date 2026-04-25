@@ -21,7 +21,7 @@ class SidebarDefaults:
     symbol: str = "000300.SS"
     history_range: str = "5Y"
     news_limit: int = 10
-    vp_lookback_days: int = 20
+    vp_lookback_days: int = 60
     vp_bins: int = 48
     weekly_vp_lookback: int = 26
     weekly_vp_bins: int = 24
@@ -32,7 +32,7 @@ class SidebarDefaults:
     max_support_zones: int = 3
     show_avwap_lines: bool = True
     show_all_candidate_zones: bool = True
-    show_atr_bands: bool = False
+    show_atr_bands: bool = True
     atr_multiplier: float = 2.0
     reaction_lookahead: int = 5
     reaction_threshold_bp: int = 150
