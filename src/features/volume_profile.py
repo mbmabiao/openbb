@@ -61,16 +61,37 @@ def compute_vwap(df: pd.DataFrame, start_idx: int) -> pd.Series:
     return output
 
 
-def find_anchor_points(df: pd.DataFrame, recent_window_cap: int = 126) -> dict[str, int]:
+def _trading_days_to_bars(timeframe: str, trading_days: int) -> int:
+    normalized = str(timeframe).upper().strip()
+    if normalized == "W":
+        return max(int(np.ceil(trading_days / 5.0)), 1)
+    return max(int(trading_days), 1)
+
+
+def find_anchor_points(
+    df: pd.DataFrame,
+    timeframe: str,
+    anchor_windows_trading_days: dict[str, int] | None = None,
+) -> dict[str, int]:
     anchors: dict[str, int] = {}
-    if len(df) < 30:
+    if df.empty:
         return anchors
 
-    recent_window = min(recent_window_cap, len(df))
+    anchor_windows_trading_days = anchor_windows_trading_days or {
+        "short_term": 20,
+        "medium_term": 60,
+    }
+    max_anchor_window = max(anchor_windows_trading_days.values(), default=60)
+    recent_window = min(_trading_days_to_bars(timeframe, max_anchor_window), len(df))
     recent_slice = df.iloc[-recent_window:]
 
-    anchors["major_high"] = int(recent_slice["high"].idxmax())
-    anchors["major_low"] = int(recent_slice["low"].idxmin())
+    for label, trading_days in anchor_windows_trading_days.items():
+        required_bars = _trading_days_to_bars(timeframe, trading_days)
+        if len(df) < required_bars:
+            continue
+        window_slice = df.iloc[-required_bars:]
+        anchors[f"{label}_high"] = int(window_slice["high"].idxmax())
+        anchors[f"{label}_low"] = int(window_slice["low"].idxmin())
 
     previous_close = df["close"].shift(1)
     gap_pct = (df["open"] - previous_close) / previous_close.replace(0, np.nan)
@@ -282,13 +303,28 @@ def build_composite_interval_volume_profile_zones(
 
 
 def build_avwap_features(df: pd.DataFrame, timeframe: str) -> tuple[pd.DataFrame, dict]:
-    recent_window_cap = 126 if timeframe == "D" else 60
-    anchors = find_anchor_points(df, recent_window_cap=recent_window_cap)
+    anchor_windows_trading_days = {
+        "short_term": 20,
+        "medium_term": 60,
+    }
+    anchors = find_anchor_points(
+        df,
+        timeframe=timeframe,
+        anchor_windows_trading_days=anchor_windows_trading_days,
+    )
     avwap_columns: dict[str, pd.Series] = {}
     anchor_meta: dict[str, dict] = {}
 
     for anchor_name, index in anchors.items():
         column_name = f"avwap_{timeframe}_{anchor_name}"
+        anchor_window_days = next(
+            (
+                trading_days
+                for label, trading_days in anchor_windows_trading_days.items()
+                if anchor_name.startswith(label)
+            ),
+            None,
+        )
         avwap_columns[column_name] = compute_vwap(df, index)
         anchor_meta[column_name] = {
             "anchor_name": anchor_name,
@@ -296,6 +332,7 @@ def build_avwap_features(df: pd.DataFrame, timeframe: str) -> tuple[pd.DataFrame
             "start_date": df.loc[index, "date"],
             "start_price": float(df.loc[index, "close"]),
             "timeframe": timeframe,
+            "anchor_window_trading_days": anchor_window_days,
         }
 
     output = df.copy()

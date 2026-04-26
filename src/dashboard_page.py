@@ -493,6 +493,7 @@ def _build_anchor_rows(df_with_features: pd.DataFrame, anchor_meta: dict) -> lis
                 "timeframe": meta["timeframe"],
                 "avwap_column": column_name,
                 "anchor_name": meta["anchor_name"],
+                "anchor_window_trading_days": meta.get("anchor_window_trading_days"),
                 "start_date": meta["start_date"],
                 "start_price": meta["start_price"],
                 "latest_avwap": avwap_now,
