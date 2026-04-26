@@ -22,6 +22,8 @@ def create_candidate_zones_from_avwap(
         center = avwap_now
         expand = center * zone_expand_pct
         timeframe = meta["timeframe"]
+        anchor_family = str(meta.get("anchor_family", "rolling"))
+        source_type = f"avwap_{timeframe}_{anchor_family}"
 
         if center >= current_price:
             zone_side = "resistance"
@@ -43,9 +45,9 @@ def create_candidate_zones_from_avwap(
                 "anchor_name": meta["anchor_name"],
                 "anchor_start_date": meta["start_date"],
                 "timeframes": {timeframe},
-                "source_types": {f"avwap_{timeframe}"},
+                "source_types": {source_type},
                 "primary_timeframe": timeframe,
-                "source_label": f"AVWAP ({timeframe})",
+                "source_label": f"AVWAP ({timeframe}, {anchor_family})",
             }
         )
 

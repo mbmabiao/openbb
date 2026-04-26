@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -61,58 +63,182 @@ def compute_vwap(df: pd.DataFrame, start_idx: int) -> pd.Series:
     return output
 
 
-def _trading_days_to_bars(timeframe: str, trading_days: int) -> int:
-    normalized = str(timeframe).upper().strip()
-    if normalized == "W":
-        return max(int(np.ceil(trading_days / 5.0)), 1)
-    return max(int(trading_days), 1)
+def _find_confirmed_swing_points(
+    df: pd.DataFrame,
+    left_bars: int = 3,
+    right_bars: int = 3,
+    min_reversal_atr: float = 1.0,
+    atr_period: int = 20,
+) -> tuple[list[int], list[int]]:
+    if df.empty or len(df) <= (left_bars + right_bars):
+        return [], []
+
+    atr_series = compute_atr(df, period=atr_period)
+    highs = pd.to_numeric(df["high"], errors="coerce")
+    lows = pd.to_numeric(df["low"], errors="coerce")
+
+    swing_highs: list[int] = []
+    swing_lows: list[int] = []
+
+    for idx in range(left_bars, len(df) - right_bars):
+        atr_value = float(atr_series.iloc[idx]) if pd.notna(atr_series.iloc[idx]) else np.nan
+        if not np.isfinite(atr_value) or atr_value <= 0:
+            continue
+
+        high_value = float(highs.iloc[idx])
+        low_value = float(lows.iloc[idx])
+        if not np.isfinite(high_value) or not np.isfinite(low_value):
+            continue
+
+        left_highs = highs.iloc[idx - left_bars:idx]
+        right_highs = highs.iloc[idx + 1:idx + 1 + right_bars]
+        left_lows = lows.iloc[idx - left_bars:idx]
+        right_lows = lows.iloc[idx + 1:idx + 1 + right_bars]
+
+        if (
+            left_highs.notna().all()
+            and right_highs.notna().all()
+            and high_value > float(left_highs.max())
+            and high_value > float(right_highs.max())
+        ):
+            reversal_down = high_value - float(right_lows.min())
+            if reversal_down >= (min_reversal_atr * atr_value):
+                swing_highs.append(idx)
+
+        if (
+            left_lows.notna().all()
+            and right_lows.notna().all()
+            and low_value < float(left_lows.min())
+            and low_value < float(right_lows.min())
+        ):
+            reversal_up = float(right_highs.max()) - low_value
+            if reversal_up >= (min_reversal_atr * atr_value):
+                swing_lows.append(idx)
+
+    return swing_highs, swing_lows
 
 
 def find_anchor_points(
     df: pd.DataFrame,
     timeframe: str,
-    anchor_windows_trading_days: dict[str, int] | None = None,
-) -> dict[str, int]:
-    anchors: dict[str, int] = {}
+    rolling_window_bars: tuple[int, ...] | None = None,
+    swing_search_bars: int = 60,
+    event_search_bars: int = 60,
+) -> dict[str, dict[str, Any]]:
+    anchors: dict[str, dict[str, Any]] = {}
     if df.empty:
         return anchors
 
-    anchor_windows_trading_days = anchor_windows_trading_days or {
-        "short_term": 20,
-        "medium_term": 60,
-    }
-    max_anchor_window = max(anchor_windows_trading_days.values(), default=60)
-    recent_window = min(_trading_days_to_bars(timeframe, max_anchor_window), len(df))
-    recent_slice = df.iloc[-recent_window:]
+    rolling_window_bars = rolling_window_bars or (20, 60)
+    swing_highs, swing_lows = _find_confirmed_swing_points(
+        df,
+        left_bars=3,
+        right_bars=3,
+        min_reversal_atr=1.0,
+        atr_period=20,
+    )
 
-    for label, trading_days in anchor_windows_trading_days.items():
-        required_bars = _trading_days_to_bars(timeframe, trading_days)
-        if len(df) < required_bars:
+    for window_bars in rolling_window_bars:
+        if len(df) < window_bars:
             continue
-        window_slice = df.iloc[-required_bars:]
-        anchors[f"{label}_high"] = int(window_slice["high"].idxmax())
-        anchors[f"{label}_low"] = int(window_slice["low"].idxmin())
+        window_slice = df.iloc[-window_bars:]
+        anchors[f"rolling_{window_bars}_high"] = {
+            "index": int(window_slice["high"].idxmax()),
+            "anchor_family": "rolling",
+            "anchor_window_bars": window_bars,
+            "anchor_search_bars": None,
+            "timeframe": timeframe,
+        }
+        anchors[f"rolling_{window_bars}_low"] = {
+            "index": int(window_slice["low"].idxmin()),
+            "anchor_family": "rolling",
+            "anchor_window_bars": window_bars,
+            "anchor_search_bars": None,
+            "timeframe": timeframe,
+        }
 
+    swing_search_bars = min(max(int(swing_search_bars), 1), len(df))
+    swing_window_start = len(df) - swing_search_bars
+    recent_swing_highs = [idx for idx in swing_highs if idx >= swing_window_start]
+    recent_swing_lows = [idx for idx in swing_lows if idx >= swing_window_start]
+
+    if recent_swing_highs:
+        anchors["recent_swing_high"] = {
+            "index": int(recent_swing_highs[-1]),
+            "anchor_family": "swing",
+            "anchor_window_bars": None,
+            "anchor_search_bars": swing_search_bars,
+            "timeframe": timeframe,
+        }
+    if len(recent_swing_highs) >= 2:
+        anchors["previous_swing_high"] = {
+            "index": int(recent_swing_highs[-2]),
+            "anchor_family": "swing",
+            "anchor_window_bars": None,
+            "anchor_search_bars": swing_search_bars,
+            "timeframe": timeframe,
+        }
+    if recent_swing_lows:
+        anchors["recent_swing_low"] = {
+            "index": int(recent_swing_lows[-1]),
+            "anchor_family": "swing",
+            "anchor_window_bars": None,
+            "anchor_search_bars": swing_search_bars,
+            "timeframe": timeframe,
+        }
+    if len(recent_swing_lows) >= 2:
+        anchors["previous_swing_low"] = {
+            "index": int(recent_swing_lows[-2]),
+            "anchor_family": "swing",
+            "anchor_window_bars": None,
+            "anchor_search_bars": swing_search_bars,
+            "timeframe": timeframe,
+        }
+
+    event_search_bars = min(max(int(event_search_bars), 1), len(df))
     previous_close = df["close"].shift(1)
     gap_pct = (df["open"] - previous_close) / previous_close.replace(0, np.nan)
-    gap_slice = gap_pct.iloc[-recent_window:]
+    gap_slice = gap_pct.iloc[-event_search_bars:]
     if gap_slice.notna().sum() > 0:
-        anchors["gap_down"] = int(gap_slice.idxmin())
-        anchors["gap_up"] = int(gap_slice.idxmax())
+        anchors["gap_down"] = {
+            "index": int(gap_slice.idxmin()),
+            "anchor_family": "event",
+            "anchor_window_bars": None,
+            "anchor_search_bars": event_search_bars,
+            "timeframe": timeframe,
+        }
+        anchors["gap_up"] = {
+            "index": int(gap_slice.idxmax()),
+            "anchor_family": "event",
+            "anchor_window_bars": None,
+            "anchor_search_bars": event_search_bars,
+            "timeframe": timeframe,
+        }
 
     body_return = (df["close"] - df["open"]) / df["open"].replace(0, np.nan)
-    body_slice = body_return.iloc[-recent_window:]
+    body_slice = body_return.iloc[-event_search_bars:]
     if body_slice.notna().sum() > 0:
-        anchors["big_down"] = int(body_slice.idxmin())
-        anchors["big_up"] = int(body_slice.idxmax())
+        anchors["big_down"] = {
+            "index": int(body_slice.idxmin()),
+            "anchor_family": "event",
+            "anchor_window_bars": None,
+            "anchor_search_bars": event_search_bars,
+            "timeframe": timeframe,
+        }
+        anchors["big_up"] = {
+            "index": int(body_slice.idxmax()),
+            "anchor_family": "event",
+            "anchor_window_bars": None,
+            "anchor_search_bars": event_search_bars,
+            "timeframe": timeframe,
+        }
 
-    deduped: dict[str, int] = {}
-    seen_indexes: set[int] = set()
-    for name, index in anchors.items():
-        if index not in seen_indexes and 0 <= index < len(df) - 1:
-            deduped[name] = index
-            seen_indexes.add(index)
-    return deduped
+    filtered: dict[str, dict[str, Any]] = {}
+    for name, meta in anchors.items():
+        index = int(meta["index"])
+        if 0 <= index < len(df) - 1:
+            filtered[name] = meta
+    return filtered
 
 
 def build_vp_zones_from_profile(
@@ -303,36 +429,29 @@ def build_composite_interval_volume_profile_zones(
 
 
 def build_avwap_features(df: pd.DataFrame, timeframe: str) -> tuple[pd.DataFrame, dict]:
-    anchor_windows_trading_days = {
-        "short_term": 20,
-        "medium_term": 60,
-    }
     anchors = find_anchor_points(
         df,
         timeframe=timeframe,
-        anchor_windows_trading_days=anchor_windows_trading_days,
+        rolling_window_bars=(20, 60),
+        swing_search_bars=60,
+        event_search_bars=60,
     )
     avwap_columns: dict[str, pd.Series] = {}
     anchor_meta: dict[str, dict] = {}
 
-    for anchor_name, index in anchors.items():
+    for anchor_name, source_meta in anchors.items():
+        index = int(source_meta["index"])
         column_name = f"avwap_{timeframe}_{anchor_name}"
-        anchor_window_days = next(
-            (
-                trading_days
-                for label, trading_days in anchor_windows_trading_days.items()
-                if anchor_name.startswith(label)
-            ),
-            None,
-        )
         avwap_columns[column_name] = compute_vwap(df, index)
         anchor_meta[column_name] = {
             "anchor_name": anchor_name,
+            "anchor_family": source_meta["anchor_family"],
             "start_idx": index,
             "start_date": df.loc[index, "date"],
             "start_price": float(df.loc[index, "close"]),
             "timeframe": timeframe,
-            "anchor_window_trading_days": anchor_window_days,
+            "anchor_window_bars": source_meta.get("anchor_window_bars"),
+            "anchor_search_bars": source_meta.get("anchor_search_bars"),
         }
 
     output = df.copy()
