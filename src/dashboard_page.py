@@ -124,21 +124,21 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             symbol=controls.symbol,
             provider=controls.price_provider,
             trading_dates=daily_vp_dates,
-            interval="1h",
+            interval="5m",
             bins=controls.vp_bins,
             zone_expand_pct=controls.zone_expand_pct,
             hv_node_quantile=controls.hv_node_quantile,
             timeframe="D",
-            source_label="VP (D, 1h composite)",
-            source_mode="1h_composite",
-            default_mode="1h composite",
-            unavailable_mode="1h unavailable",
-            source_error_note="1h history could not be loaded for the selected replay window, so daily VP was omitted.",
-            empty_source_note="No 1h history was returned for the selected replay window, so daily VP was omitted.",
-            empty_profile_note="1h history was returned, but no valid composite daily VP could be built, so daily VP was omitted.",
-            build_error_note="1h composite daily VP construction failed for the selected replay window, so daily VP was omitted.",
+            source_label="VP (D, 5m composite)",
+            source_mode="5m_composite",
+            default_mode="5m composite",
+            unavailable_mode="5m unavailable",
+            source_error_note="5m history could not be loaded for the selected replay window, so daily VP was omitted.",
+            empty_source_note="No 5m history was returned for the selected replay window, so daily VP was omitted.",
+            empty_profile_note="5m history was returned, but no valid composite daily VP could be built, so daily VP was omitted.",
+            build_error_note="5m composite daily VP construction failed for the selected replay window, so daily VP was omitted.",
             success_note_builder=lambda source_df: (
-                f"Daily VP uses {len(daily_vp_dates)} trading days / {len(source_df)} bars of 1h OHLCV."
+                f"Daily VP uses {len(daily_vp_dates)} trading days / {len(source_df)} bars of 5m OHLCV."
             ),
         )
         daily_vp_zones = create_candidate_zones_from_vp(
