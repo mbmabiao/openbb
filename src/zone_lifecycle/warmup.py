@@ -44,6 +44,8 @@ def ensure_symbol_lifecycle_ready(
     lookback_years: int = 2,
     timeframe: str = "1d",
     as_of_date=None,
+    snapshot_start_date=None,
+    snapshot_end_date=None,
     force: bool = False,
 ) -> LifecycleWarmupResult:
     """Warm up or incrementally advance lifecycle state for one symbol.
@@ -69,6 +71,8 @@ def ensure_symbol_lifecycle_ready(
         )
 
     as_of_ts = _coerce_timestamp(as_of_date) or bars["timestamp"].max()
+    snapshot_start_ts = _coerce_timestamp(snapshot_start_date)
+    snapshot_end_ts = _coerce_timestamp(snapshot_end_date) or as_of_ts
     bars = bars[bars["timestamp"] <= as_of_ts].copy()
     if bars.empty:
         return LifecycleWarmupResult(
@@ -148,7 +152,25 @@ def ensure_symbol_lifecycle_ready(
             bars_since_created_by_zone_id=_bars_since_origin_by_zone_id(matching_active_zones, history),
         )
 
+        snapshot_zones_by_id = {
+            zone.zone_id: zone
+            for zone in session.scalars(
+                select(Zone)
+                .where(Zone.symbol == normalized_symbol)
+            ).all()
+            if _timeframes_match(zone.timeframe, normalized_timeframe)
+            and (snapshot_start_ts is None or pd.Timestamp(bar.timestamp) >= snapshot_start_ts)
+            and pd.Timestamp(bar.timestamp) <= snapshot_end_ts
+        }
         for zone in selected_zones:
+            if (
+                _timeframes_match(zone.timeframe, normalized_timeframe)
+                and (snapshot_start_ts is None or pd.Timestamp(bar.timestamp) >= snapshot_start_ts)
+                and pd.Timestamp(bar.timestamp) <= snapshot_end_ts
+            ):
+                snapshot_zones_by_id[zone.zone_id] = zone
+
+        for zone in snapshot_zones_by_id.values():
             record_zone_snapshot(
                 session,
                 ZoneSnapshotInput(

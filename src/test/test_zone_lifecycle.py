@@ -17,6 +17,7 @@ from zone_lifecycle.lifecycle import BarInput, apply_composite_lifecycle, expire
 from zone_lifecycle.models import BreakoutEvent, SymbolLifecycleState, Zone, ZoneDailySnapshot
 from zone_lifecycle.repository import create_session_factory
 from zone_lifecycle.service import ZoneSnapshotInput, record_zone_snapshot, upsert_zone
+from zone_lifecycle.snapshot_queries import load_replay_zone_snapshots
 from zone_lifecycle.warmup import ensure_symbol_lifecycle_ready
 from engines.zone_generation import ZoneGenerationConfig, generate_zones_for_replay, make_replay_zone_provider
 from features.boundaries import merge_close_zones
@@ -175,6 +176,65 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             self.assertEqual(updated.distance_to_price, 0.0)
             snapshot_count = session.scalar(select(func.count()).select_from(ZoneDailySnapshot))
             self.assertEqual(snapshot_count, 1)
+
+    def test_replay_zone_snapshots_are_read_from_database(self) -> None:
+        with self.Session() as session:
+            support = upsert_zone(
+                session,
+                symbol="TSLA",
+                timeframe="1d",
+                zone_kind=ZoneKind.EVENT,
+                source=["swing_low"],
+                price_low=200.0,
+                price_high=210.0,
+                current_role="support",
+                origin_bar=dt.datetime(2026, 2, 1),
+                origin_event_id="support-2026-02-01",
+            )
+            expired = upsert_zone(
+                session,
+                symbol="TSLA",
+                timeframe="1d",
+                zone_kind=ZoneKind.EVENT,
+                source=["swing_high"],
+                price_low=260.0,
+                price_high=270.0,
+                current_role="resistance",
+                origin_bar=dt.datetime(2026, 2, 1),
+                origin_event_id="expired-2026-02-01",
+            )
+            expired.status = ZoneStatus.EXPIRED
+            record_zone_snapshot(
+                session,
+                ZoneSnapshotInput(
+                    zone_id=support.zone_id,
+                    snapshot_ts=dt.datetime(2026, 2, 10),
+                    current_price=215.0,
+                    atr=5.0,
+                ),
+            )
+            record_zone_snapshot(
+                session,
+                ZoneSnapshotInput(
+                    zone_id=expired.zone_id,
+                    snapshot_ts=dt.datetime(2026, 2, 10),
+                    current_price=215.0,
+                    atr=5.0,
+                ),
+            )
+
+            result = load_replay_zone_snapshots(
+                session,
+                symbol="tsla",
+                replay_date=dt.datetime(2026, 2, 10),
+                max_support_zones=3,
+                max_resistance_zones=3,
+            )
+
+        self.assertEqual(len(result.support_zones), 1)
+        self.assertEqual(result.support_zones[0]["zone_id"], support.zone_id)
+        self.assertEqual(result.support_zones[0]["display_label"], "S1")
+        self.assertEqual(result.resistance_zones, [])
 
     def test_dashboard_shadow_persistence_is_idempotent(self) -> None:
         support_zone = self._build_composite_dashboard_zone()

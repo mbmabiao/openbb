@@ -21,6 +21,7 @@ from .service import (
     record_zone_snapshot,
     upsert_zone,
 )
+from .snapshot_queries import ReplayZoneSnapshotResult, load_replay_zone_snapshots
 from .warmup import LifecycleWarmupResult, ensure_symbol_lifecycle_ready
 
 __all__ = [
@@ -35,12 +36,14 @@ __all__ = [
     "ZoneSnapshotInput",
     "LifecycleWarmupResult",
     "DashboardZonePersistenceResult",
+    "ReplayZoneSnapshotResult",
     "create_session_factory",
     "apply_composite_lifecycle",
     "distance_to_zone",
     "expire_event_zones",
     "generate_zone_id",
     "init_db",
+    "load_replay_zone_snapshots",
     "process_zone_bar",
     "record_zone_snapshot",
     "update_zone_interaction_counts",

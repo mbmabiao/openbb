@@ -9,8 +9,8 @@ from data.market_data import (
     load_price_history_frame,
 )
 from engines.replay_engine import prepare_plot_and_calc_frames, prepare_replay_frame
-from engines.zone_generation import config_from_controls, generate_zones_for_replay
 from features.boundaries import zones_to_dataframe
+from features.volume_profile import compute_atr
 from plotting.chart_builder import (
     build_volume_profile_overlay_data,
     build_chart_options,
@@ -21,7 +21,7 @@ from plotting.chart_builder import (
 from ui.panels import show_definitions
 from ui.sidebar import DashboardControls
 from ui.state import get_replay_date_state, render_replay_controls
-from zone_lifecycle import persist_dashboard_zones_safely
+from zone_lifecycle import create_session_factory, load_replay_zone_snapshots
 
 
 def render_historical_price_tab(controls: DashboardControls) -> None:
@@ -79,39 +79,38 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
         )
         df_plot_display = df_plot_replay.tail(controls.initial_visible_bars).copy()
 
-        generated_zones = generate_zones_for_replay(
-            symbol=controls.symbol,
-            provider=controls.price_provider,
-            df_calc_daily=df_calc_daily,
-            config=config_from_controls(controls),
+        current_price = float(df_calc_daily["close"].iloc[-1])
+        atr20_series = compute_atr(df_calc_daily, period=20)
+        atr20_value = (
+            float(atr20_series.iloc[-1])
+            if not atr20_series.empty and pd.notna(atr20_series.iloc[-1])
+            else np.nan
         )
-        current_price = generated_zones.current_price
-        atr20_value = generated_zones.atr20_value
         atr_overlay = _build_atr_overlay(
-            df_calc_daily_with_features=generated_zones.df_calc_daily_with_features,
-            atr20_series=generated_zones.atr20_series,
+            df_calc_daily_with_features=df_calc_daily,
+            atr20_series=atr20_series,
             show_atr_bands=controls.show_atr_bands,
             atr_multiplier=controls.atr_multiplier,
         )
-        support_zones = generated_zones.support_zones
-        resistance_zones = generated_zones.resistance_zones
-        all_candidate_zones = generated_zones.all_candidate_zones
-
-        persist_dashboard_zones_safely(
-            symbol=controls.symbol,
-            replay_date=replay_date,
-            current_price=current_price,
-            atr_value=atr20_value,
-            support_zones=support_zones,
-            resistance_zones=resistance_zones,
-        )
+        Session = create_session_factory()
+        with Session() as session:
+            snapshot_zones = load_replay_zone_snapshots(
+                session,
+                symbol=controls.symbol,
+                replay_date=replay_date,
+                max_support_zones=controls.max_support_zones,
+                max_resistance_zones=controls.max_resistance_zones,
+            )
+        support_zones = snapshot_zones.support_zones
+        resistance_zones = snapshot_zones.resistance_zones
+        all_candidate_zones = snapshot_zones.all_zones
 
         chart_series = build_lwc_series(
             df_plot=df_plot_display,
-            df_calc_daily_with_features=generated_zones.df_calc_daily_with_features,
+            df_calc_daily_with_features=df_calc_daily,
             support_zones=support_zones,
             resistance_zones=resistance_zones,
-            daily_anchor_meta=generated_zones.daily_anchor_meta,
+            daily_anchor_meta={},
             show_avwap_lines=controls.show_avwap_lines,
             atr_overlay=atr_overlay,
         )
@@ -130,11 +129,16 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
                 chart_options=build_chart_options(),
                 series=chart_series,
                 chart_key=f"lwc_{controls.symbol}_{pd.Timestamp(replay_date).strftime('%Y%m%d')}",
-                volume_profile_data=build_volume_profile_overlay_data(generated_zones.daily_vp_context.profile_df),
+                volume_profile_data=build_volume_profile_overlay_data(pd.DataFrame()),
             )
 
-        st.caption(f"Daily VP mode: {generated_zones.daily_vp_context.mode}. {generated_zones.daily_vp_context.note}")
-        st.caption(f"Weekly VP mode: {generated_zones.weekly_vp_context.mode}. {generated_zones.weekly_vp_context.note}")
+        if not support_zones and not resistance_zones:
+            st.info(
+                "No zone snapshots were found for this replay date. "
+                "Run the offline snapshot task for the symbol/date range to populate them."
+            )
+        else:
+            st.caption("Zones are loaded from zone_daily_snapshots. The dashboard does not warm up or write zones.")
         if controls.show_atr_bands:
             if np.isfinite(atr20_value):
                 st.caption(
@@ -178,41 +182,21 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
                 st.info("No candidate zones detected.")
 
         st.markdown("### Daily AVWAP Anchor Points")
-        daily_anchor_rows = _build_anchor_rows(
-            generated_zones.df_calc_daily_with_features,
-            generated_zones.daily_anchor_meta,
-        )
-        if daily_anchor_rows:
-            st.dataframe(pd.DataFrame(daily_anchor_rows), use_container_width=True)
-        else:
-            st.info("No daily AVWAP anchors available.")
+        st.info("AVWAP anchor details are produced by the offline zone snapshot task, not during replay rendering.")
 
         st.markdown("### Weekly AVWAP Anchor Points")
-        weekly_anchor_rows = _build_anchor_rows(
-            generated_zones.df_calc_weekly_with_features,
-            generated_zones.weekly_anchor_meta,
-        )
-        if weekly_anchor_rows:
-            st.dataframe(pd.DataFrame(weekly_anchor_rows), use_container_width=True)
-        else:
-            st.info("No weekly AVWAP anchors available.")
+        st.info("Weekly anchor details are produced by the offline zone snapshot task, not during replay rendering.")
 
         st.markdown("### Daily Composite Volume Profile Bins")
-        if not generated_zones.daily_vp_context.profile_df.empty:
-            st.dataframe(generated_zones.daily_vp_context.profile_df, use_container_width=True)
-        else:
-            st.info("No daily composite volume profile data available.")
+        st.info("Daily composite volume profile bins are not rebuilt during replay rendering.")
 
         st.markdown("### Weekly / Higher-Timeframe Volume Profile Bins")
-        if not generated_zones.weekly_vp_context.profile_df.empty:
-            st.dataframe(generated_zones.weekly_vp_context.profile_df, use_container_width=True)
-        else:
-            st.info("No weekly or higher-timeframe volume profile data available.")
+        st.info("Weekly composite volume profile bins are not rebuilt during replay rendering.")
 
         st.markdown("### Data Frames Used")
         st.markdown(f"- Plot rows (replay): **{len(df_plot_replay)}**")
-        st.markdown(f"- Daily calc rows: **{len(generated_zones.df_calc_daily_with_features)}**")
-        st.markdown(f"- Weekly calc rows: **{len(generated_zones.df_calc_weekly_with_features)}**")
+        st.markdown(f"- Daily calc rows: **{len(df_calc_daily)}**")
+        st.markdown(f"- Zone snapshots loaded: **{len(all_candidate_zones)}**")
 
         st.markdown("### Historical Price Data (Replay Plot Frame)")
         st.dataframe(df_plot_replay, use_container_width=True)
