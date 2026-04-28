@@ -12,9 +12,9 @@ from engines.replay_engine import prepare_plot_and_calc_frames, prepare_replay_f
 from features.boundaries import zones_to_dataframe
 from features.volume_profile import compute_atr
 from plotting.chart_builder import (
-    build_volume_profile_overlay_data,
     build_chart_options,
     build_lwc_series,
+    build_volume_profile_overlay_data,
     render_lwc_chart_with_focus_header,
     render_zone_left_panel,
 )
@@ -62,7 +62,8 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             st.warning("Calculation frame is empty after excluding the latest bar.")
             return
 
-        replay_date = get_replay_date_state(df_calc_daily_base, controls.symbol)
+        get_replay_date_state(df_calc_daily_base, controls.symbol)
+        replay_date = render_replay_controls(df_calc_daily_base, controls.symbol)
         df_plot_replay, df_calc_daily = prepare_replay_frame(df_plot, df_calc_daily_base, replay_date)
         if df_calc_daily.empty:
             st.warning("No calculation data available on or before the selected replay date.")
@@ -92,6 +93,7 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             show_atr_bands=controls.show_atr_bands,
             atr_multiplier=controls.atr_multiplier,
         )
+
         Session = create_session_factory()
         with Session() as session:
             snapshot_zones = load_replay_zone_snapshots(
@@ -103,7 +105,7 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             )
         support_zones = snapshot_zones.support_zones
         resistance_zones = snapshot_zones.resistance_zones
-        all_candidate_zones = snapshot_zones.all_zones
+        all_snapshot_zones = snapshot_zones.all_zones
 
         chart_series = build_lwc_series(
             df_plot=df_plot_display,
@@ -114,8 +116,6 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             show_avwap_lines=controls.show_avwap_lines,
             atr_overlay=atr_overlay,
         )
-
-        replay_date = render_replay_controls(df_calc_daily_base, controls.symbol)
 
         left_col, right_col = st.columns([1.15, 6.2], vertical_alignment="top")
         with left_col:
@@ -139,6 +139,7 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             )
         else:
             st.caption("Zones are loaded from zone_daily_snapshots. The dashboard does not warm up or write zones.")
+
         if controls.show_atr_bands:
             if np.isfinite(atr20_value):
                 st.caption(
@@ -175,11 +176,11 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             st.info("No important support zones found.")
 
         if controls.show_all_candidate_zones:
-            st.markdown("### All Candidate Zones")
-            if all_candidate_zones:
-                st.dataframe(zones_to_dataframe(all_candidate_zones), use_container_width=True)
+            st.markdown("### All Snapshot Zones")
+            if all_snapshot_zones:
+                st.dataframe(zones_to_dataframe(all_snapshot_zones), use_container_width=True)
             else:
-                st.info("No candidate zones detected.")
+                st.info("No zone snapshots found for this replay date.")
 
         st.markdown("### Daily AVWAP Anchor Points")
         st.info("AVWAP anchor details are produced by the offline zone snapshot task, not during replay rendering.")
@@ -196,7 +197,7 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
         st.markdown("### Data Frames Used")
         st.markdown(f"- Plot rows (replay): **{len(df_plot_replay)}**")
         st.markdown(f"- Daily calc rows: **{len(df_calc_daily)}**")
-        st.markdown(f"- Zone snapshots loaded: **{len(all_candidate_zones)}**")
+        st.markdown(f"- Zone snapshots loaded: **{len(all_snapshot_zones)}**")
 
         st.markdown("### Historical Price Data (Replay Plot Frame)")
         st.dataframe(df_plot_replay, use_container_width=True)
@@ -269,31 +270,6 @@ def _render_summary_metrics(
     col3.metric("Nearest Support", _format_zone_metric(nearest_support))
     if col4 is not None:
         col4.metric("ATR20", f"{atr20_value:.2f}", f"{atr_multiplier:.1f}x = {atr20_value * atr_multiplier:.2f}")
-
-
-def _build_anchor_rows(df_with_features: pd.DataFrame, anchor_meta: dict) -> list[dict]:
-    rows: list[dict] = []
-    for column_name, meta in anchor_meta.items():
-        latest_avwap = (
-            df_with_features[column_name].dropna()
-            if column_name in df_with_features.columns
-            else pd.Series(dtype=float)
-        )
-        avwap_now = float(latest_avwap.iloc[-1]) if not latest_avwap.empty else np.nan
-        rows.append(
-            {
-                "timeframe": meta["timeframe"],
-                "avwap_column": column_name,
-                "anchor_name": meta["anchor_name"],
-                "anchor_family": meta.get("anchor_family"),
-                "anchor_window_bars": meta.get("anchor_window_bars"),
-                "anchor_search_bars": meta.get("anchor_search_bars"),
-                "start_date": meta["start_date"],
-                "start_price": meta["start_price"],
-                "latest_avwap": avwap_now,
-            }
-        )
-    return rows
 
 
 def _format_zone_metric(zone: dict | None) -> str:
