@@ -21,7 +21,7 @@ class SidebarDefaults:
     symbol: str = "000300.SS"
     history_range: str = "5Y"
     news_limit: int = 10
-    vp_lookback_days: int = 60
+    vp_lookback_days: int = 63
     vp_bins: int = 48
     weekly_vp_lookback: int = 26
     weekly_vp_bins: int = 24

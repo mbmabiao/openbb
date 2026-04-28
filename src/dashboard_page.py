@@ -1,34 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable
-
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 from data.market_data import (
-    fetch_interval_history_for_dates,
     get_missing_ohlc_columns,
-    get_recent_trading_dates,
-    get_recent_trading_dates_for_weekly_window,
     load_price_history_frame,
 )
 from engines.replay_engine import prepare_plot_and_calc_frames, prepare_replay_frame
-from engines.validation_engine import rank_zones_for_side
-from features.boundaries import (
-    assign_zone_display_labels,
-    create_candidate_zones_from_avwap,
-    create_candidate_zones_from_vp,
-    merge_close_zones,
-    zones_to_dataframe,
-)
-from features.volume_profile import (
-    build_avwap_features,
-    build_composite_interval_volume_profile_zones,
-    compute_atr,
-    resample_to_weekly,
-)
+from engines.zone_generation import config_from_controls, generate_zones_for_replay
+from features.boundaries import zones_to_dataframe
 from plotting.chart_builder import (
     build_volume_profile_overlay_data,
     build_chart_options,
@@ -39,15 +21,7 @@ from plotting.chart_builder import (
 from ui.panels import show_definitions
 from ui.sidebar import DashboardControls
 from ui.state import get_replay_date_state, render_replay_controls
-
-
-@dataclass(frozen=True)
-class VolumeProfileContext:
-    mode: str
-    note: str
-    source_df: pd.DataFrame
-    zones_raw: list[dict]
-    profile_df: pd.DataFrame
+from zone_lifecycle import persist_dashboard_zones_safely
 
 
 def render_historical_price_tab(controls: DashboardControls) -> None:
@@ -105,128 +79,39 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
         )
         df_plot_display = df_plot_replay.tail(controls.initial_visible_bars).copy()
 
-        current_price = float(df_calc_daily["close"].iloc[-1])
-        atr20_series = compute_atr(df_calc_daily, period=20)
-        atr20_value = (
-            float(atr20_series.iloc[-1])
-            if not atr20_series.empty and pd.notna(atr20_series.iloc[-1])
-            else np.nan
+        generated_zones = generate_zones_for_replay(
+            symbol=controls.symbol,
+            provider=controls.price_provider,
+            df_calc_daily=df_calc_daily,
+            config=config_from_controls(controls),
         )
-        df_calc_daily_with_features, daily_anchor_meta = build_avwap_features(df_calc_daily, timeframe="D")
+        current_price = generated_zones.current_price
+        atr20_value = generated_zones.atr20_value
         atr_overlay = _build_atr_overlay(
-            df_calc_daily_with_features=df_calc_daily_with_features,
-            atr20_series=atr20_series,
+            df_calc_daily_with_features=generated_zones.df_calc_daily_with_features,
+            atr20_series=generated_zones.atr20_series,
             show_atr_bands=controls.show_atr_bands,
             atr_multiplier=controls.atr_multiplier,
         )
-        daily_vp_dates = get_recent_trading_dates(df_calc_daily, controls.vp_lookback_days)
-        daily_vp_context = _load_interval_volume_profile_context(
+        support_zones = generated_zones.support_zones
+        resistance_zones = generated_zones.resistance_zones
+        all_candidate_zones = generated_zones.all_candidate_zones
+
+        persist_dashboard_zones_safely(
             symbol=controls.symbol,
-            provider=controls.price_provider,
-            trading_dates=daily_vp_dates,
-            interval="5m",
-            bins=controls.vp_bins,
-            zone_expand_pct=controls.zone_expand_pct,
-            hv_node_quantile=controls.hv_node_quantile,
-            timeframe="D",
-            source_label="VP (D, 5m composite)",
-            source_mode="5m_composite",
-            default_mode="5m composite",
-            unavailable_mode="5m unavailable",
-            source_error_note="5m history could not be loaded for the selected replay window, so daily VP was omitted.",
-            empty_source_note="No 5m history was returned for the selected replay window, so daily VP was omitted.",
-            empty_profile_note="5m history was returned, but no valid composite daily VP could be built, so daily VP was omitted.",
-            build_error_note="5m composite daily VP construction failed for the selected replay window, so daily VP was omitted.",
-            success_note_builder=lambda source_df: (
-                f"Daily VP uses {len(daily_vp_dates)} trading days / {len(source_df)} bars of 5m OHLCV."
-            ),
-        )
-        daily_vp_zones = create_candidate_zones_from_vp(
-            df=df_calc_daily_with_features,
-            vp_zones=daily_vp_context.zones_raw,
-        )
-        daily_avwap_zones = create_candidate_zones_from_avwap(
-            df=df_calc_daily_with_features,
-            anchor_meta=daily_anchor_meta,
-            zone_expand_pct=controls.zone_expand_pct,
-        )
-
-        df_calc_weekly = resample_to_weekly(df_calc_daily)
-        df_calc_weekly_with_features, weekly_anchor_meta = build_avwap_features(df_calc_weekly, timeframe="W")
-        weekly_vp_dates = get_recent_trading_dates_for_weekly_window(
-            df_calc_daily,
-            controls.weekly_vp_lookback,
-        )
-        weekly_vp_context = _load_interval_volume_profile_context(
-            symbol=controls.symbol,
-            provider=controls.price_provider,
-            trading_dates=weekly_vp_dates,
-            interval="1d",
-            bins=controls.weekly_vp_bins,
-            zone_expand_pct=controls.zone_expand_pct,
-            hv_node_quantile=controls.hv_node_quantile,
-            timeframe="W",
-            source_label="VP (W, 1d higher-timeframe composite)",
-            source_mode="1d_higher_timeframe_composite",
-            default_mode="1d higher-timeframe composite",
-            unavailable_mode="1d unavailable",
-            source_error_note="1d higher-timeframe history could not be loaded for the selected replay window, so higher-timeframe VP was omitted.",
-            empty_source_note="No 1d higher-timeframe history was returned for the selected replay window, so higher-timeframe VP was omitted.",
-            empty_profile_note="1d higher-timeframe history was returned, but no valid composite VP could be built, so higher-timeframe VP was omitted.",
-            build_error_note="1d higher-timeframe VP construction failed for the selected replay window, so higher-timeframe VP was omitted.",
-            success_note_builder=lambda source_df: (
-                f"Weekly VP uses {len(weekly_vp_dates)} trading days / {len(source_df)} bars of 1d OHLCV."
-            ),
-        )
-        weekly_vp_zones = create_candidate_zones_from_vp(
-            df=df_calc_weekly_with_features,
-            vp_zones=weekly_vp_context.zones_raw,
-        )
-        weekly_avwap_zones = create_candidate_zones_from_avwap(
-            df=df_calc_weekly_with_features,
-            anchor_meta=weekly_anchor_meta,
-            zone_expand_pct=controls.zone_expand_pct,
-        )
-
-        all_candidate_zones = merge_close_zones(
-            daily_vp_zones + daily_avwap_zones + weekly_vp_zones + weekly_avwap_zones,
-            merge_pct=controls.merge_pct,
-        )
-
-        resistance_zones = rank_zones_for_side(
-            zones=all_candidate_zones,
-            vp_df_daily=daily_vp_context.profile_df,
-            vp_df_weekly=weekly_vp_context.profile_df,
+            replay_date=replay_date,
             current_price=current_price,
-            side="resistance",
-            max_zones=controls.max_resistance_zones,
-            df_reaction=df_calc_daily,
-            lookahead=controls.reaction_lookahead,
-            reaction_threshold=controls.reaction_return_threshold,
-            min_gap=controls.min_touch_gap,
+            atr_value=atr20_value,
+            support_zones=support_zones,
+            resistance_zones=resistance_zones,
         )
-        resistance_zones = assign_zone_display_labels(resistance_zones, prefix="R")
-
-        support_zones = rank_zones_for_side(
-            zones=all_candidate_zones,
-            vp_df_daily=daily_vp_context.profile_df,
-            vp_df_weekly=weekly_vp_context.profile_df,
-            current_price=current_price,
-            side="support",
-            max_zones=controls.max_support_zones,
-            df_reaction=df_calc_daily,
-            lookahead=controls.reaction_lookahead,
-            reaction_threshold=controls.reaction_return_threshold,
-            min_gap=controls.min_touch_gap,
-        )
-        support_zones = assign_zone_display_labels(support_zones, prefix="S")
 
         chart_series = build_lwc_series(
             df_plot=df_plot_display,
-            df_calc_daily_with_features=df_calc_daily_with_features,
+            df_calc_daily_with_features=generated_zones.df_calc_daily_with_features,
             support_zones=support_zones,
             resistance_zones=resistance_zones,
-            daily_anchor_meta=daily_anchor_meta,
+            daily_anchor_meta=generated_zones.daily_anchor_meta,
             show_avwap_lines=controls.show_avwap_lines,
             atr_overlay=atr_overlay,
         )
@@ -245,11 +130,11 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
                 chart_options=build_chart_options(),
                 series=chart_series,
                 chart_key=f"lwc_{controls.symbol}_{pd.Timestamp(replay_date).strftime('%Y%m%d')}",
-                volume_profile_data=build_volume_profile_overlay_data(daily_vp_context.profile_df),
+                volume_profile_data=build_volume_profile_overlay_data(generated_zones.daily_vp_context.profile_df),
             )
 
-        st.caption(f"Daily VP mode: {daily_vp_context.mode}. {daily_vp_context.note}")
-        st.caption(f"Weekly VP mode: {weekly_vp_context.mode}. {weekly_vp_context.note}")
+        st.caption(f"Daily VP mode: {generated_zones.daily_vp_context.mode}. {generated_zones.daily_vp_context.note}")
+        st.caption(f"Weekly VP mode: {generated_zones.weekly_vp_context.mode}. {generated_zones.weekly_vp_context.note}")
         if controls.show_atr_bands:
             if np.isfinite(atr20_value):
                 st.caption(
@@ -293,35 +178,41 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
                 st.info("No candidate zones detected.")
 
         st.markdown("### Daily AVWAP Anchor Points")
-        daily_anchor_rows = _build_anchor_rows(df_calc_daily_with_features, daily_anchor_meta)
+        daily_anchor_rows = _build_anchor_rows(
+            generated_zones.df_calc_daily_with_features,
+            generated_zones.daily_anchor_meta,
+        )
         if daily_anchor_rows:
             st.dataframe(pd.DataFrame(daily_anchor_rows), use_container_width=True)
         else:
             st.info("No daily AVWAP anchors available.")
 
         st.markdown("### Weekly AVWAP Anchor Points")
-        weekly_anchor_rows = _build_anchor_rows(df_calc_weekly_with_features, weekly_anchor_meta)
+        weekly_anchor_rows = _build_anchor_rows(
+            generated_zones.df_calc_weekly_with_features,
+            generated_zones.weekly_anchor_meta,
+        )
         if weekly_anchor_rows:
             st.dataframe(pd.DataFrame(weekly_anchor_rows), use_container_width=True)
         else:
             st.info("No weekly AVWAP anchors available.")
 
         st.markdown("### Daily Composite Volume Profile Bins")
-        if not daily_vp_context.profile_df.empty:
-            st.dataframe(daily_vp_context.profile_df, use_container_width=True)
+        if not generated_zones.daily_vp_context.profile_df.empty:
+            st.dataframe(generated_zones.daily_vp_context.profile_df, use_container_width=True)
         else:
             st.info("No daily composite volume profile data available.")
 
         st.markdown("### Weekly / Higher-Timeframe Volume Profile Bins")
-        if not weekly_vp_context.profile_df.empty:
-            st.dataframe(weekly_vp_context.profile_df, use_container_width=True)
+        if not generated_zones.weekly_vp_context.profile_df.empty:
+            st.dataframe(generated_zones.weekly_vp_context.profile_df, use_container_width=True)
         else:
             st.info("No weekly or higher-timeframe volume profile data available.")
 
         st.markdown("### Data Frames Used")
         st.markdown(f"- Plot rows (replay): **{len(df_plot_replay)}**")
-        st.markdown(f"- Daily calc rows: **{len(df_calc_daily_with_features)}**")
-        st.markdown(f"- Weekly calc rows: **{len(df_calc_weekly_with_features)}**")
+        st.markdown(f"- Daily calc rows: **{len(generated_zones.df_calc_daily_with_features)}**")
+        st.markdown(f"- Weekly calc rows: **{len(generated_zones.df_calc_weekly_with_features)}**")
 
         st.markdown("### Historical Price Data (Replay Plot Frame)")
         st.dataframe(df_plot_replay, use_container_width=True)
@@ -360,89 +251,6 @@ def _build_atr_overlay(
             for row in atr_frame.itertuples(index=False)
         ],
     }
-
-
-def _load_interval_volume_profile_context(
-    *,
-    symbol: str,
-    provider: str | None,
-    trading_dates: list[pd.Timestamp],
-    interval: str,
-    bins: int,
-    zone_expand_pct: float,
-    hv_node_quantile: float,
-    timeframe: str,
-    source_label: str,
-    source_mode: str,
-    default_mode: str,
-    unavailable_mode: str,
-    source_error_note: str,
-    empty_source_note: str,
-    empty_profile_note: str,
-    build_error_note: str,
-    success_note_builder: Callable[[pd.DataFrame], str],
-) -> VolumeProfileContext:
-    source_df = pd.DataFrame()
-    try:
-        source_df = fetch_interval_history_for_dates(
-            symbol_value=symbol,
-            trading_dates=trading_dates,
-            provider_value=provider,
-            interval_value=interval,
-        )
-    except Exception as error:
-        return VolumeProfileContext(
-            mode=unavailable_mode,
-            note=f"{source_error_note} Details: {error}",
-            source_df=pd.DataFrame(),
-            zones_raw=[],
-            profile_df=pd.DataFrame(),
-        )
-
-    if source_df.empty:
-        return VolumeProfileContext(
-            mode=unavailable_mode,
-            note=empty_source_note,
-            source_df=source_df,
-            zones_raw=[],
-            profile_df=pd.DataFrame(),
-        )
-
-    try:
-        zones_raw, profile_df = build_composite_interval_volume_profile_zones(
-            interval_df=source_df,
-            bins=bins,
-            zone_expand=zone_expand_pct,
-            hv_quantile=hv_node_quantile,
-            timeframe=timeframe,
-            source_label=source_label,
-            source_mode=source_mode,
-        )
-    except Exception as error:
-        return VolumeProfileContext(
-            mode=unavailable_mode,
-            note=f"{build_error_note} Details: {error}",
-            source_df=source_df,
-            zones_raw=[],
-            profile_df=pd.DataFrame(),
-        )
-
-    if profile_df.empty:
-        return VolumeProfileContext(
-            mode=unavailable_mode,
-            note=empty_profile_note,
-            source_df=source_df,
-            zones_raw=[],
-            profile_df=pd.DataFrame(),
-        )
-
-    return VolumeProfileContext(
-        mode=default_mode,
-        note=success_note_builder(source_df),
-        source_df=source_df,
-        zones_raw=zones_raw,
-        profile_df=profile_df,
-    )
 
 
 def _render_summary_metrics(

@@ -34,7 +34,7 @@ def resample_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
     return weekly
 
 
-def compute_atr(df: pd.DataFrame, period: int = 20) -> pd.Series:
+def compute_atr(df: pd.DataFrame, period: int = 21) -> pd.Series:
     required = {"high", "low", "close"}
     if df.empty or period < 1 or not required.issubset(df.columns):
         return pd.Series(index=df.index, dtype=float)
@@ -68,7 +68,7 @@ def _find_confirmed_swing_points(
     left_bars: int = 3,
     right_bars: int = 3,
     min_reversal_atr: float = 1.0,
-    atr_period: int = 20,
+    atr_period: int = 21, 
 ) -> tuple[list[int], list[int]]:
     if df.empty or len(df) <= (left_bars + right_bars):
         return [], []
@@ -122,20 +122,20 @@ def find_anchor_points(
     df: pd.DataFrame,
     timeframe: str,
     rolling_window_bars: tuple[int, ...] | None = None,
-    swing_search_bars: int = 60,
-    event_search_bars: int = 60,
+    swing_search_bars: int = 63,
+    event_search_bars: int = 63,
 ) -> dict[str, dict[str, Any]]:
     anchors: dict[str, dict[str, Any]] = {}
     if df.empty:
         return anchors
 
-    rolling_window_bars = rolling_window_bars or (20, 60)
+    rolling_window_bars = rolling_window_bars or (21, 63)
     swing_highs, swing_lows = _find_confirmed_swing_points(
         df,
         left_bars=3,
         right_bars=3,
         min_reversal_atr=1.0,
-        atr_period=20,
+        atr_period=21,
     )
 
     for window_bars in rolling_window_bars:
@@ -432,9 +432,9 @@ def build_avwap_features(df: pd.DataFrame, timeframe: str) -> tuple[pd.DataFrame
     anchors = find_anchor_points(
         df,
         timeframe=timeframe,
-        rolling_window_bars=(20, 60),
-        swing_search_bars=60,
-        event_search_bars=60,
+        rolling_window_bars=(21, 63),
+        swing_search_bars=63,
+        event_search_bars=63,
     )
     avwap_columns: dict[str, pd.Series] = {}
     anchor_meta: dict[str, dict] = {}

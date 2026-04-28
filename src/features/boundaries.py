@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import pandas as pd
 
+from zone_lifecycle.constants import ZoneKind
+from zone_lifecycle.identity import ZoneIdentityInput, generate_zone_id
+
 
 def create_candidate_zones_from_avwap(
     df: pd.DataFrame,
     anchor_meta: dict,
     zone_expand_pct: float,
+    symbol: str | None = None,
 ) -> list[dict]:
     zones: list[dict] = []
     if df.empty:
@@ -32,29 +36,37 @@ def create_candidate_zones_from_avwap(
             zone_side = "support"
             avwap_strength = max((current_price - center) / max(current_price, 1e-9), 0.0) + 0.5
 
-        zones.append(
-            {
-                "type": f"avwap_{zone_side}_{timeframe}",
-                "side": zone_side,
-                "lower": center - expand,
-                "upper": center + expand,
-                "center": center,
-                "vp_volume": 0.0,
-                "anchor_count": 1,
-                "avwap_strength": avwap_strength,
-                "anchor_name": meta["anchor_name"],
-                "anchor_start_date": meta["start_date"],
-                "timeframes": {timeframe},
-                "source_types": {source_type},
-                "primary_timeframe": timeframe,
-                "source_label": f"AVWAP ({timeframe}, {anchor_family})",
-            }
-        )
+        zone = {
+            "type": f"avwap_{zone_side}_{timeframe}",
+            "side": zone_side,
+            "lower": center - expand,
+            "upper": center + expand,
+            "center": center,
+            "vp_volume": 0.0,
+            "anchor_count": 1,
+            "avwap_strength": avwap_strength,
+            "anchor_name": meta["anchor_name"],
+            "anchor_start_date": meta["start_date"],
+            "anchor_family": anchor_family,
+            "timeframes": {timeframe},
+            "source_types": {source_type},
+            "primary_timeframe": timeframe,
+            "source_label": f"AVWAP ({timeframe}, {anchor_family})",
+            "zone_kind": ZoneKind.EVENT,
+            "origin_bar": meta["start_date"],
+            "origin_event_id": meta["anchor_name"],
+            "origin_event_type": anchor_family,
+        }
+        zones.append(_with_identity_metadata(zone, symbol=symbol))
 
     return zones
 
 
-def create_candidate_zones_from_vp(df: pd.DataFrame, vp_zones: list[dict]) -> list[dict]:
+def create_candidate_zones_from_vp(
+    df: pd.DataFrame,
+    vp_zones: list[dict],
+    symbol: str | None = None,
+) -> list[dict]:
     if df.empty:
         return []
 
@@ -65,7 +77,9 @@ def create_candidate_zones_from_vp(df: pd.DataFrame, vp_zones: list[dict]) -> li
         enriched["anchor_count"] = 0
         enriched["avwap_strength"] = 0.0
         enriched["side"] = "resistance" if zone["center"] >= current_price else "support"
-        output.append(enriched)
+        enriched["zone_kind"] = ZoneKind.VP
+        enriched["vp_window_type"] = str(zone.get("source_label") or zone.get("type") or "vp")
+        output.append(_with_identity_metadata(enriched, symbol=symbol))
     return output
 
 
@@ -86,7 +100,11 @@ def format_zone_source_types(
     return ",".join(formatted)
 
 
-def merge_close_zones(zones: list[dict], merge_pct: float = 0.006) -> list[dict]:
+def merge_close_zones(
+    zones: list[dict],
+    merge_pct: float = 0.006,
+    symbol: str | None = None,
+) -> list[dict]:
     if not zones:
         return []
 
@@ -107,7 +125,7 @@ def merge_close_zones(zones: list[dict], merge_pct: float = 0.006) -> list[dict]
             new_upper = max(previous["upper"], zone["upper"])
             timeframes = set(previous.get("timeframes", set())) | set(zone.get("timeframes", set()))
             source_types = set(previous.get("source_types", set())) | set(zone.get("source_types", set()))
-            merged[-1] = {
+            merged_zone = {
                 "type": f"merged_{previous['side']}",
                 "side": previous["side"],
                 "lower": float(new_lower),
@@ -122,7 +140,11 @@ def merge_close_zones(zones: list[dict], merge_pct: float = 0.006) -> list[dict]
                 "source_types": source_types,
                 "primary_timeframe": "W" if "W" in timeframes else "D",
                 "source_label": format_zone_source_types(source_types),
+                "zone_kind": ZoneKind.COMPOSITE,
+                "merged_from_zone_ids": _collect_source_zone_ids(previous, zone),
+                "source_components": _collect_source_components(previous, zone),
             }
+            merged[-1] = _with_identity_metadata(merged_zone, symbol=symbol)
         else:
             merged.append(zone.copy())
 
@@ -217,3 +239,85 @@ def _max_profile_volume(vp_df: pd.DataFrame) -> float:
     if pd.isna(max_value):
         return 1.0
     return max(float(max_value), 1e-9)
+
+
+def _with_identity_metadata(zone: dict, symbol: str | None) -> dict:
+    zone_copy = zone.copy()
+    if symbol:
+        zone_copy["zone_id"] = _generate_zone_id(symbol=symbol, zone=zone_copy)
+    if "zone_id" in zone_copy:
+        zone_copy.setdefault("source_zone_ids", [zone_copy["zone_id"]])
+    zone_copy.setdefault("source_components", [_component_payload(zone_copy)])
+    return zone_copy
+
+
+def _generate_zone_id(symbol: str, zone: dict) -> str:
+    zone_kind = zone.get("zone_kind") or ZoneKind.EVENT
+    return generate_zone_id(
+        ZoneIdentityInput(
+            symbol=symbol,
+            timeframe=str(zone.get("primary_timeframe") or _format_timeframe(zone.get("timeframes")) or "1d"),
+            zone_kind=str(zone_kind),
+            source=tuple(sorted(set(zone.get("source_types", set())))),
+            price_low=float(zone["lower"]),
+            price_high=float(zone["upper"]),
+            origin_bar=zone.get("origin_bar") or zone.get("anchor_start_date"),
+            origin_event_id=zone.get("origin_event_id") or zone.get("anchor_name"),
+            vp_window_type=zone.get("vp_window_type") or zone.get("source_label"),
+            merged_from_zone_ids=tuple(zone.get("merged_from_zone_ids") or ()),
+        )
+    )
+
+
+def _format_timeframe(value) -> str:
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+    return ",".join(sorted(str(item) for item in value))
+
+
+def _collect_source_zone_ids(*zones: dict) -> list[str]:
+    ids: list[str] = []
+    for zone in zones:
+        zone_ids = zone.get("source_zone_ids") or ([zone["zone_id"]] if zone.get("zone_id") else [])
+        ids.extend(str(zone_id) for zone_id in zone_ids if str(zone_id).strip())
+    return sorted(set(ids))
+
+
+def _collect_source_components(*zones: dict) -> list[dict]:
+    components_by_id: dict[str, dict] = {}
+    anonymous_components: list[dict] = []
+    for zone in zones:
+        components = zone.get("source_components") or [_component_payload(zone)]
+        for component in components:
+            component_id = component.get("zone_id")
+            if component_id:
+                components_by_id[str(component_id)] = component
+            else:
+                anonymous_components.append(component)
+    return [*anonymous_components, *[components_by_id[key] for key in sorted(components_by_id)]]
+
+
+def _component_payload(zone: dict) -> dict:
+    keys = [
+        "zone_id",
+        "zone_kind",
+        "type",
+        "side",
+        "lower",
+        "upper",
+        "center",
+        "timeframes",
+        "source_types",
+        "primary_timeframe",
+        "source_label",
+        "anchor_name",
+        "anchor_start_date",
+        "anchor_family",
+        "origin_bar",
+        "origin_event_id",
+        "origin_event_type",
+        "vp_window_type",
+    ]
+    return {key: zone[key] for key in keys if key in zone}
