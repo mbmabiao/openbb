@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pandas as pd
+from sqlalchemy import delete
+from sqlalchemy.orm import Session
 
 from data.market_data import clean_price_history_frame, fetch_price_history, normalise_ohlcv_columns, to_dataframe
 from engines.zone_generation import ZoneGenerationConfig, make_preloaded_zone_provider
+from .models import BreakoutEvent, SymbolLifecycleState, Zone, ZoneDailySnapshot
 from .repository import create_session_factory
 from .warmup import LifecycleWarmupResult, ensure_symbol_lifecycle_ready
 
@@ -28,6 +31,7 @@ def build_zone_snapshots_offline(
     database_url: str | None = None,
     lookback_years: int = 2,
     force: bool = True,
+    reset: bool = False,
 ) -> OfflineSnapshotBuildResult:
     normalized_symbol = str(symbol).strip().upper()
     start_ts = pd.Timestamp(start_date).normalize()
@@ -63,6 +67,9 @@ def build_zone_snapshots_offline(
     )
     Session = create_session_factory(database_url)
     with Session() as session:
+        if reset:
+            reset_symbol_lifecycle_data(session, normalized_symbol)
+            session.flush()
         lifecycle = ensure_symbol_lifecycle_ready(
             session,
             symbol=normalized_symbol,
@@ -83,6 +90,14 @@ def build_zone_snapshots_offline(
         end_date=end_ts,
         lifecycle=lifecycle,
     )
+
+
+def reset_symbol_lifecycle_data(session: Session, symbol: str) -> None:
+    normalized_symbol = str(symbol).strip().upper()
+    session.execute(delete(ZoneDailySnapshot).where(ZoneDailySnapshot.symbol == normalized_symbol))
+    session.execute(delete(BreakoutEvent).where(BreakoutEvent.symbol == normalized_symbol))
+    session.execute(delete(Zone).where(Zone.symbol == normalized_symbol))
+    session.execute(delete(SymbolLifecycleState).where(SymbolLifecycleState.symbol == normalized_symbol))
 
 
 def _build_interval_cache(

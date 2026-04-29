@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from data.market_data import (
+    fetch_interval_history_for_dates,
     get_missing_ohlc_columns,
     load_price_history_frame,
 )
@@ -92,7 +93,9 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             show_atr_bands=controls.show_atr_bands,
             atr_multiplier=controls.atr_multiplier,
         )
-        vap_profile_df = _build_local_vap_profile(
+        vap_profile_df, vap_caption = _build_display_vap_profile(
+            symbol=controls.symbol,
+            provider=controls.price_provider,
             df_calc_daily=df_calc_daily,
             lookback_bars=controls.vp_lookback_days,
             bins=controls.vp_bins,
@@ -145,10 +148,7 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
         else:
             st.caption("Zones are loaded from zone_daily_snapshots. The dashboard does not warm up or write zones.")
         if not vap_profile_df.empty:
-            st.caption(
-                f"VAP/POC overlay uses local daily OHLCV: "
-                f"{int(vap_profile_df['source_bars'].max())} bars / {len(vap_profile_df)} bins."
-            )
+            st.caption(vap_caption)
 
         if controls.show_atr_bands:
             if np.isfinite(atr20_value):
@@ -217,17 +217,89 @@ def _build_atr_overlay(
     }
 
 
-def _build_local_vap_profile(
+def _build_display_vap_profile(
     *,
+    symbol: str,
+    provider: str | None,
     df_calc_daily: pd.DataFrame,
     lookback_bars: int,
     bins: int,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, str]:
     required = {"date", "open", "high", "low", "close", "volume"}
     if df_calc_daily.empty or not required.issubset(set(df_calc_daily.columns)):
-        return pd.DataFrame()
+        return pd.DataFrame(), ""
 
     source = df_calc_daily.tail(max(int(lookback_bars), 1)).copy()
+    source_dates = pd.to_datetime(source["date"], errors="coerce").dt.normalize()
+    today = pd.Timestamp.today().normalize()
+    live_daily_dates = {today, today - pd.Timedelta(days=1)}
+    recent_5m_dates = [
+        pd.Timestamp(value).normalize()
+        for value in source_dates.dropna().drop_duplicates()
+        if pd.Timestamp(value).normalize() in live_daily_dates
+    ]
+
+    if recent_5m_dates:
+        try:
+            interval_source = fetch_interval_history_for_dates(
+                symbol_value=symbol,
+                trading_dates=recent_5m_dates,
+                provider_value=provider,
+                interval_value="5m",
+            )
+        except Exception:
+            interval_source = pd.DataFrame()
+
+        if not interval_source.empty:
+            interval_dates = pd.to_datetime(interval_source["date"], errors="coerce").dt.normalize()
+            replaced_dates = set(interval_dates.dropna().unique())
+            daily_source = source.loc[~source_dates.isin(replaced_dates)].copy()
+            composite_source = pd.concat([daily_source, interval_source], ignore_index=True, sort=False)
+            profile_df = _build_vap_profile_from_source(
+                source=composite_source,
+                bins=bins,
+                source_label="VAP (daily + latest 5m)",
+                source_mode="daily_with_latest_5m",
+            )
+            if not profile_df.empty:
+                replaced_date_labels = ", ".join(
+                    str(pd.Timestamp(value).date()) for value in sorted(replaced_dates)
+                )
+                return (
+                    profile_df,
+                    "VAP/POC overlay uses daily OHLCV, with only the latest dates replaced by 5m bars "
+                    f"({replaced_date_labels}): {len(daily_source)} daily bars + "
+                    f"{len(interval_source)} 5m bars / {int(profile_df['source_bars'].max())} source bars / "
+                    f"{len(profile_df)} bins.",
+                )
+
+    profile_df = _build_vap_profile_from_source(
+        source=source,
+        bins=bins,
+        source_label="VAP (local daily)",
+        source_mode="local_daily_replay",
+    )
+    if profile_df.empty:
+        return pd.DataFrame(), ""
+    return (
+        profile_df,
+        "VAP/POC overlay uses local daily OHLCV: "
+        f"{int(profile_df['source_bars'].max())} bars / {len(profile_df)} bins.",
+    )
+
+
+def _build_vap_profile_from_source(
+    *,
+    source: pd.DataFrame,
+    bins: int,
+    source_label: str,
+    source_mode: str,
+) -> pd.DataFrame:
+    required = {"open", "high", "low", "close", "volume"}
+    if source.empty or not required.issubset(set(source.columns)):
+        return pd.DataFrame()
+
+    source = source.copy()
     for column in ["open", "high", "low", "close", "volume"]:
         source[column] = pd.to_numeric(source[column], errors="coerce")
     source = source.dropna(subset=["open", "high", "low", "close", "volume"]).copy()
@@ -241,8 +313,8 @@ def _build_local_vap_profile(
         zone_expand=0.0,
         hv_quantile=0.80,
         timeframe="D",
-        source_label="VAP (local daily)",
-        source_mode="local_daily_replay",
+        source_label=source_label,
+        source_mode=source_mode,
     )
     return profile_df
 

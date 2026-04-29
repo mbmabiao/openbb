@@ -3,6 +3,7 @@ from __future__ import annotations
 
 class ZoneKind:
     EVENT = "event"
+    AVWAP = "avwap"
     VP = "vp"
     COMPOSITE = "composite"
 

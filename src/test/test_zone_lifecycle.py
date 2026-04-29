@@ -15,6 +15,7 @@ from zone_lifecycle.constants import BreakoutEventStatus, ZoneKind, ZoneRole, Zo
 from zone_lifecycle.dashboard_persistence import persist_dashboard_zones
 from zone_lifecycle.lifecycle import BarInput, apply_composite_lifecycle, expire_event_zones, update_zone_interaction_counts
 from zone_lifecycle.models import BreakoutEvent, SymbolLifecycleState, Zone, ZoneDailySnapshot
+from zone_lifecycle.offline_snapshots import reset_symbol_lifecycle_data
 from zone_lifecycle.repository import create_session_factory
 from zone_lifecycle.service import ZoneSnapshotInput, record_zone_snapshot, upsert_zone
 from zone_lifecycle.snapshot_queries import load_replay_zone_snapshots
@@ -26,7 +27,7 @@ from engines.zone_generation import (
     make_preloaded_zone_provider,
     make_replay_zone_provider,
 )
-from features.boundaries import merge_close_zones
+from features.boundaries import create_candidate_zones_from_avwap, merge_close_zones
 
 
 class ZoneLifecyclePhaseOneTests(unittest.TestCase):
@@ -142,6 +143,139 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             self.assertEqual(second.price_high, 305.0)
             zone_count = session.scalar(select(func.count()).select_from(Zone))
             self.assertEqual(zone_count, 1)
+
+    def test_avwap_zone_keeps_anchor_identity_while_price_window_drifts(self) -> None:
+        anchor_meta = {
+            "avwap_D_rolling_21_high": {
+                "anchor_name": "rolling_21_high",
+                "anchor_family": "rolling",
+                "start_date": dt.datetime(2026, 1, 5),
+                "timeframe": "D",
+            }
+        }
+        first_df = pd.DataFrame(
+            [
+                {"date": dt.datetime(2026, 1, 5), "close": 100.0, "avwap_D_rolling_21_high": 101.0},
+                {"date": dt.datetime(2026, 1, 6), "close": 102.0, "avwap_D_rolling_21_high": 102.5},
+            ]
+        )
+        second_df = pd.DataFrame(
+            [
+                {"date": dt.datetime(2026, 1, 5), "close": 100.0, "avwap_D_rolling_21_high": 101.0},
+                {"date": dt.datetime(2026, 1, 7), "close": 104.0, "avwap_D_rolling_21_high": 103.5},
+            ]
+        )
+
+        first = create_candidate_zones_from_avwap(
+            first_df,
+            anchor_meta=anchor_meta,
+            zone_expand_pct=0.01,
+            symbol="AAPL",
+        )[0]
+        second = create_candidate_zones_from_avwap(
+            second_df,
+            anchor_meta=anchor_meta,
+            zone_expand_pct=0.01,
+            symbol="AAPL",
+        )[0]
+
+        self.assertEqual(first["zone_kind"], ZoneKind.AVWAP)
+        self.assertEqual(second["zone_kind"], ZoneKind.AVWAP)
+        self.assertEqual(first["zone_id"], second["zone_id"])
+        self.assertNotEqual(first["lower"], second["lower"])
+        self.assertNotEqual(first["upper"], second["upper"])
+
+    def test_reset_symbol_lifecycle_data_deletes_only_requested_symbol(self) -> None:
+        with self.Session() as session:
+            aapl_zone = upsert_zone(
+                session,
+                symbol="AAPL",
+                timeframe="1d",
+                zone_kind=ZoneKind.AVWAP,
+                source=["avwap_D_rolling"],
+                price_low=100.0,
+                price_high=102.0,
+                current_role="support",
+                origin_bar=dt.datetime(2026, 1, 5),
+                origin_event_id="rolling_21_high",
+            )
+            msft_zone = upsert_zone(
+                session,
+                symbol="MSFT",
+                timeframe="1d",
+                zone_kind=ZoneKind.AVWAP,
+                source=["avwap_D_rolling"],
+                price_low=200.0,
+                price_high=202.0,
+                current_role="support",
+                origin_bar=dt.datetime(2026, 1, 5),
+                origin_event_id="rolling_21_high",
+            )
+            record_zone_snapshot(
+                session,
+                ZoneSnapshotInput(
+                    zone_id=aapl_zone.zone_id,
+                    snapshot_ts=dt.datetime(2026, 1, 6),
+                    current_price=101.0,
+                    atr=2.0,
+                ),
+            )
+            record_zone_snapshot(
+                session,
+                ZoneSnapshotInput(
+                    zone_id=msft_zone.zone_id,
+                    snapshot_ts=dt.datetime(2026, 1, 6),
+                    current_price=201.0,
+                    atr=2.0,
+                ),
+            )
+            session.add(
+                SymbolLifecycleState(
+                    state_id="state_aapl_1d",
+                    symbol="AAPL",
+                    timeframe="1d",
+                    warmup_start_ts=dt.datetime(2025, 1, 1),
+                    last_processed_ts=dt.datetime(2026, 1, 6),
+                    lookback_years=1,
+                    created_ts=dt.datetime(2026, 1, 6),
+                    updated_ts=dt.datetime(2026, 1, 6),
+                    metadata_json={},
+                )
+            )
+            session.add(
+                SymbolLifecycleState(
+                    state_id="state_msft_1d",
+                    symbol="MSFT",
+                    timeframe="1d",
+                    warmup_start_ts=dt.datetime(2025, 1, 1),
+                    last_processed_ts=dt.datetime(2026, 1, 6),
+                    lookback_years=1,
+                    created_ts=dt.datetime(2026, 1, 6),
+                    updated_ts=dt.datetime(2026, 1, 6),
+                    metadata_json={},
+                )
+            )
+            session.flush()
+
+            reset_symbol_lifecycle_data(session, "aapl")
+            session.flush()
+
+            self.assertEqual(session.scalar(select(func.count()).select_from(Zone).where(Zone.symbol == "AAPL")), 0)
+            self.assertEqual(
+                session.scalar(select(func.count()).select_from(ZoneDailySnapshot).where(ZoneDailySnapshot.symbol == "AAPL")),
+                0,
+            )
+            self.assertEqual(
+                session.scalar(
+                    select(func.count()).select_from(SymbolLifecycleState).where(SymbolLifecycleState.symbol == "AAPL")
+                ),
+                0,
+            )
+            self.assertEqual(session.scalar(select(func.count()).select_from(Zone).where(Zone.symbol == "MSFT")), 1)
+            self.assertEqual(
+                session.scalar(select(func.count()).select_from(ZoneDailySnapshot).where(ZoneDailySnapshot.symbol == "MSFT")),
+                1,
+            )
 
     def test_snapshot_records_distance_and_updates_same_day(self) -> None:
         with self.Session() as session:
@@ -730,7 +864,7 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
         return [
             {
                 "zone_id": avwap_id,
-                "zone_kind": ZoneKind.EVENT,
+                "zone_kind": ZoneKind.AVWAP,
                 "type": "avwap_support_D",
                 "side": "support",
                 "lower": 98.0,
@@ -746,7 +880,7 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
                 "source_components": [
                     {
                         "zone_id": avwap_id,
-                        "zone_kind": ZoneKind.EVENT,
+                        "zone_kind": ZoneKind.AVWAP,
                         "type": "avwap_support_D",
                         "side": "support",
                         "lower": 98.0,

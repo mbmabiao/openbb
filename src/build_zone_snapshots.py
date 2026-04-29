@@ -15,6 +15,7 @@ def main() -> None:
     parser.add_argument("--database-url", default=None, help="SQLAlchemy database URL. Defaults to outputs/zone_lifecycle.sqlite.")
     parser.add_argument("--lookback-years", type=int, default=2, help="Warmup lookback years before start date.")
     parser.add_argument("--no-force", action="store_true", help="Process incrementally instead of rebuilding the range.")
+    parser.add_argument("--reset", action="store_true", help="Delete existing lifecycle data for the symbol before rebuilding.")
     parser.add_argument("--vp-lookback-days", type=int, default=20)
     parser.add_argument("--vp-bins", type=int, default=48)
     parser.add_argument("--weekly-vp-lookback", type=int, default=52)
@@ -37,6 +38,7 @@ def main() -> None:
         database_url=args.database_url,
         lookback_years=args.lookback_years,
         force=not args.no_force,
+        reset=args.reset,
         config=ZoneGenerationConfig(
             vp_lookback_days=args.vp_lookback_days,
             vp_bins=args.vp_bins,

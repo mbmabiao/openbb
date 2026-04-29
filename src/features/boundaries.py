@@ -52,7 +52,7 @@ def create_candidate_zones_from_avwap(
             "source_types": {source_type},
             "primary_timeframe": timeframe,
             "source_label": f"AVWAP ({timeframe}, {anchor_family})",
-            "zone_kind": ZoneKind.EVENT,
+            "zone_kind": ZoneKind.AVWAP,
             "origin_bar": meta["start_date"],
             "origin_event_id": meta["anchor_name"],
             "origin_event_type": anchor_family,

@@ -38,6 +38,15 @@ def generate_zone_id(identity: ZoneIdentityInput) -> str:
             "price_low": _round_price(identity.price_low),
             "price_high": _round_price(identity.price_high),
         }
+    elif zone_kind == ZoneKind.AVWAP:
+        payload = {
+            "symbol": _normalize_symbol(identity.symbol),
+            "timeframe": _normalize_timeframe(identity.timeframe),
+            "zone_kind": ZoneKind.AVWAP,
+            "source": _normalize_string_list(identity.source),
+            "anchor_start": _normalize_timestamp(identity.origin_bar),
+            "anchor_id": identity.origin_event_id or "",
+        }
     elif zone_kind == ZoneKind.VP:
         payload = {
             "symbol": _normalize_symbol(identity.symbol),
@@ -67,6 +76,8 @@ def infer_zone_kind(source: Iterable[str], merged_from_zone_ids: Iterable[str] |
     normalized_sources = _normalize_string_list(source)
     if len(normalized_sources) > 1:
         return ZoneKind.COMPOSITE
+    if normalized_sources and normalized_sources[0].startswith("avwap"):
+        return ZoneKind.AVWAP
     if normalized_sources and normalized_sources[0].startswith("vp"):
         return ZoneKind.VP
     return ZoneKind.EVENT
