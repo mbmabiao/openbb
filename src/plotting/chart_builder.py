@@ -217,6 +217,9 @@ def build_lwc_series(
                     "overlay_label": {
                         "text": zone.get("display_label", ""),
                         "color": "#cc3333",
+                        "fillColor": "rgba(204, 51, 51, 0.20)",
+                        "lower": float(zone["lower"]),
+                        "upper": float(zone["upper"]),
                     },
                     "options": {
                         "lineWidth": 3,
@@ -239,6 +242,9 @@ def build_lwc_series(
                     "overlay_label": {
                         "text": zone.get("display_label", ""),
                         "color": "#2e8b57",
+                        "fillColor": "rgba(46, 139, 87, 0.20)",
+                        "lower": float(zone["lower"]),
+                        "upper": float(zone["upper"]),
                     },
                     "options": {
                         "lineWidth": 3,
@@ -402,6 +408,14 @@ def render_lwc_chart_with_focus_header(
     line-height: 1.2;
     box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
     white-space: nowrap;
+  }}
+
+  .lwc-zone-band {{
+    position: absolute;
+    left: 0;
+    right: 64px;
+    min-height: 2px;
+    pointer-events: none;
   }}
 
   .lwc-volume-profile-bar {{
@@ -586,6 +600,9 @@ def render_lwc_chart_with_focus_header(
         value: Number(item.data[0].value),
         text: item.overlay_label.text || "",
         color: item.overlay_label.color || "#111827",
+        fillColor: item.overlay_label.fillColor || "",
+        lower: Number(item.overlay_label.lower),
+        upper: Number(item.overlay_label.upper),
       }});
     }}
 
@@ -632,6 +649,17 @@ def render_lwc_chart_with_focus_header(
 
     zoneLabels.innerHTML = "";
     zoneLabelSeries.forEach((item) => {{
+      const upperY = item.series.priceToCoordinate(item.upper);
+      const lowerY = item.series.priceToCoordinate(item.lower);
+      if (item.fillColor && Number.isFinite(upperY) && Number.isFinite(lowerY)) {{
+        const band = document.createElement("div");
+        band.className = "lwc-zone-band";
+        band.style.top = `${{Math.min(upperY, lowerY)}}px`;
+        band.style.height = `${{Math.max(Math.abs(lowerY - upperY), 2)}}px`;
+        band.style.background = item.fillColor;
+        zoneLabels.appendChild(band);
+      }}
+
       const y = item.series.priceToCoordinate(item.value);
       if (!Number.isFinite(y)) {{
         return;
@@ -813,8 +841,11 @@ def render_zone_left_panel(
                 f"""
 <div style="margin-bottom:10px; padding:8px 10px; border-left:6px solid #cc3333; background:#fff5f5; border-radius:6px;">
     <div style="font-weight:700;">{zone.get("display_label", "")} [{zone.get("source_types_label", "")}]</div>
+    <div style="font-size:12px; color:#555;">{zone.get("zone_status", "active")} · {zone.get("zone_kind", "")}</div>
     <div>{zone["lower"]:.2f} - {zone["upper"]:.2f}</div>
-    <div style="font-size:12px; color:#666;">Score: {zone.get("institutional_score", 0):.2f}</div>
+    <div style="font-size:12px; color:#666;">
+      T {zone.get("touch_count", 0)} · B {zone.get("break_count", 0)} · FB {zone.get("false_break_count", 0)} · CB {zone.get("confirmed_breakout_count", 0)}
+    </div>
 </div>
 """,
                 unsafe_allow_html=True,
@@ -829,8 +860,11 @@ def render_zone_left_panel(
                 f"""
 <div style="margin-bottom:10px; padding:8px 10px; border-left:6px solid #2e8b57; background:#f4fff7; border-radius:6px;">
     <div style="font-weight:700;">{zone.get("display_label", "")} [{zone.get("source_types_label", "")}]</div>
+    <div style="font-size:12px; color:#555;">{zone.get("zone_status", "active")} · {zone.get("zone_kind", "")}</div>
     <div>{zone["lower"]:.2f} - {zone["upper"]:.2f}</div>
-    <div style="font-size:12px; color:#666;">Score: {zone.get("institutional_score", 0):.2f}</div>
+    <div style="font-size:12px; color:#666;">
+      T {zone.get("touch_count", 0)} · B {zone.get("break_count", 0)} · FB {zone.get("false_break_count", 0)} · CB {zone.get("confirmed_breakout_count", 0)}
+    </div>
 </div>
 """,
                 unsafe_allow_html=True,

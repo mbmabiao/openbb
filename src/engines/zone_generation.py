@@ -98,6 +98,54 @@ def make_replay_zone_provider(
     return zone_provider
 
 
+def make_preloaded_zone_provider(
+    *,
+    symbol: str,
+    provider: str | None,
+    config: ZoneGenerationConfig,
+    interval_frames: dict[str, pd.DataFrame],
+    include_all_candidates: bool = False,
+):
+    """Create a replay provider that never performs network interval loads.
+
+    The warmup path should preload all interval data once, then use this provider
+    so each historical bar only slices local DataFrames.
+    """
+    return make_replay_zone_provider(
+        symbol=symbol,
+        provider=provider,
+        config=config,
+        interval_history_loader=make_preloaded_interval_history_loader(interval_frames),
+        include_all_candidates=include_all_candidates,
+    )
+
+
+def make_preloaded_interval_history_loader(
+    interval_frames: dict[str, pd.DataFrame],
+) -> IntervalHistoryLoader:
+    normalized_frames = {
+        str(interval).strip().lower(): _prepare_preloaded_interval_frame(frame)
+        for interval, frame in interval_frames.items()
+    }
+
+    def load_interval_history(
+        symbol: str,
+        trading_dates: list[pd.Timestamp],
+        provider: str | None,
+        interval: str,
+    ) -> pd.DataFrame:
+        del symbol, provider
+        frame = normalized_frames.get(str(interval).strip().lower(), pd.DataFrame())
+        if frame.empty or not trading_dates:
+            return pd.DataFrame()
+
+        target_dates = {pd.Timestamp(value).normalize() for value in trading_dates}
+        row_dates = pd.to_datetime(frame["date"]).dt.normalize()
+        return frame.loc[row_dates.isin(target_dates)].copy().reset_index(drop=True)
+
+    return load_interval_history
+
+
 def config_from_controls(controls) -> ZoneGenerationConfig:
     return ZoneGenerationConfig(
         vp_lookback_days=controls.vp_lookback_days,
@@ -361,3 +409,15 @@ def _ensure_date_column(frame: pd.DataFrame) -> pd.DataFrame:
     output = frame.copy()
     output["date"] = pd.to_datetime(output["timestamp"]).dt.tz_localize(None)
     return output
+
+
+def _prepare_preloaded_interval_frame(frame: pd.DataFrame | None) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    if "date" not in frame.columns:
+        return pd.DataFrame()
+
+    output = frame.copy()
+    output["date"] = pd.to_datetime(output["date"], errors="coerce")
+    output = output.dropna(subset=["date"]).copy()
+    return output.sort_values("date", kind="stable").reset_index(drop=True)

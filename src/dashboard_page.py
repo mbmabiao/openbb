@@ -10,7 +10,7 @@ from data.market_data import (
 )
 from engines.replay_engine import prepare_plot_and_calc_frames, prepare_replay_frame
 from features.boundaries import zones_to_dataframe
-from features.volume_profile import compute_atr
+from features.volume_profile import build_composite_interval_volume_profile_zones, compute_atr
 from plotting.chart_builder import (
     build_chart_options,
     build_lwc_series,
@@ -18,7 +18,6 @@ from plotting.chart_builder import (
     render_lwc_chart_with_focus_header,
     render_zone_left_panel,
 )
-from ui.panels import show_definitions
 from ui.sidebar import DashboardControls
 from ui.state import get_replay_date_state, render_replay_controls
 from zone_lifecycle import create_session_factory, load_replay_zone_snapshots
@@ -93,6 +92,11 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             show_atr_bands=controls.show_atr_bands,
             atr_multiplier=controls.atr_multiplier,
         )
+        vap_profile_df = _build_local_vap_profile(
+            df_calc_daily=df_calc_daily,
+            lookback_bars=controls.vp_lookback_days,
+            bins=controls.vp_bins,
+        )
 
         Session = create_session_factory()
         with Session() as session:
@@ -106,6 +110,7 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
         support_zones = snapshot_zones.support_zones
         resistance_zones = snapshot_zones.resistance_zones
         all_snapshot_zones = snapshot_zones.all_zones
+        visible_snapshot_zones = _filter_zones_by_visible_price_range(all_snapshot_zones, df_plot_display)
 
         chart_series = build_lwc_series(
             df_plot=df_plot_display,
@@ -129,7 +134,7 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
                 chart_options=build_chart_options(),
                 series=chart_series,
                 chart_key=f"lwc_{controls.symbol}_{pd.Timestamp(replay_date).strftime('%Y%m%d')}",
-                volume_profile_data=build_volume_profile_overlay_data(pd.DataFrame()),
+                volume_profile_data=build_volume_profile_overlay_data(vap_profile_df),
             )
 
         if not support_zones and not resistance_zones:
@@ -139,6 +144,11 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             )
         else:
             st.caption("Zones are loaded from zone_daily_snapshots. The dashboard does not warm up or write zones.")
+        if not vap_profile_df.empty:
+            st.caption(
+                f"VAP/POC overlay uses local daily OHLCV: "
+                f"{int(vap_profile_df['source_bars'].max())} bars / {len(vap_profile_df)} bins."
+            )
 
         if controls.show_atr_bands:
             if np.isfinite(atr20_value):
@@ -161,46 +171,15 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             atr_multiplier=controls.atr_multiplier,
         )
 
-        show_definitions(controls)
-
-        st.markdown("### Selected Resistance Zones")
-        if resistance_zones:
-            st.dataframe(zones_to_dataframe(resistance_zones), use_container_width=True)
-        else:
-            st.info("No important resistance zones found.")
-
-        st.markdown("### Selected Support Zones")
-        if support_zones:
-            st.dataframe(zones_to_dataframe(support_zones), use_container_width=True)
-        else:
-            st.info("No important support zones found.")
-
-        if controls.show_all_candidate_zones:
-            st.markdown("### All Snapshot Zones")
-            if all_snapshot_zones:
-                st.dataframe(zones_to_dataframe(all_snapshot_zones), use_container_width=True)
-            else:
-                st.info("No zone snapshots found for this replay date.")
-
-        st.markdown("### Daily AVWAP Anchor Points")
-        st.info("AVWAP anchor details are produced by the offline zone snapshot task, not during replay rendering.")
-
-        st.markdown("### Weekly AVWAP Anchor Points")
-        st.info("Weekly anchor details are produced by the offline zone snapshot task, not during replay rendering.")
-
-        st.markdown("### Daily Composite Volume Profile Bins")
-        st.info("Daily composite volume profile bins are not rebuilt during replay rendering.")
-
-        st.markdown("### Weekly / Higher-Timeframe Volume Profile Bins")
-        st.info("Weekly composite volume profile bins are not rebuilt during replay rendering.")
-
-        st.markdown("### Data Frames Used")
-        st.markdown(f"- Plot rows (replay): **{len(df_plot_replay)}**")
-        st.markdown(f"- Daily calc rows: **{len(df_calc_daily)}**")
-        st.markdown(f"- Zone snapshots loaded: **{len(all_snapshot_zones)}**")
-
-        st.markdown("### Historical Price Data (Replay Plot Frame)")
-        st.dataframe(df_plot_replay, use_container_width=True)
+        _render_zone_profile(
+            zones=visible_snapshot_zones,
+            replay_date=replay_date,
+            visible_start=df_plot_display["date"].iloc[0],
+            visible_end=df_plot_display["date"].iloc[-1],
+            visible_price_low=float(df_plot_display["low"].min()),
+            visible_price_high=float(df_plot_display["high"].max()),
+            total_snapshot_count=len(all_snapshot_zones),
+        )
     except Exception as error:
         st.error(f"Error: {error}")
 
@@ -238,6 +217,36 @@ def _build_atr_overlay(
     }
 
 
+def _build_local_vap_profile(
+    *,
+    df_calc_daily: pd.DataFrame,
+    lookback_bars: int,
+    bins: int,
+) -> pd.DataFrame:
+    required = {"date", "open", "high", "low", "close", "volume"}
+    if df_calc_daily.empty or not required.issubset(set(df_calc_daily.columns)):
+        return pd.DataFrame()
+
+    source = df_calc_daily.tail(max(int(lookback_bars), 1)).copy()
+    for column in ["open", "high", "low", "close", "volume"]:
+        source[column] = pd.to_numeric(source[column], errors="coerce")
+    source = source.dropna(subset=["open", "high", "low", "close", "volume"]).copy()
+    source = source.loc[source["volume"] > 0].copy()
+    if source.empty:
+        return pd.DataFrame()
+
+    _, profile_df = build_composite_interval_volume_profile_zones(
+        interval_df=source,
+        bins=max(int(bins), 1),
+        zone_expand=0.0,
+        hv_quantile=0.80,
+        timeframe="D",
+        source_label="VAP (local daily)",
+        source_mode="local_daily_replay",
+    )
+    return profile_df
+
+
 def _render_summary_metrics(
     *,
     replay_date: pd.Timestamp,
@@ -270,6 +279,145 @@ def _render_summary_metrics(
     col3.metric("Nearest Support", _format_zone_metric(nearest_support))
     if col4 is not None:
         col4.metric("ATR20", f"{atr20_value:.2f}", f"{atr_multiplier:.1f}x = {atr20_value * atr_multiplier:.2f}")
+
+
+def _filter_zones_by_visible_price_range(zones: list[dict], df_plot_display: pd.DataFrame) -> list[dict]:
+    if not zones or df_plot_display.empty:
+        return []
+
+    visible_low = float(pd.to_numeric(df_plot_display["low"], errors="coerce").min())
+    visible_high = float(pd.to_numeric(df_plot_display["high"], errors="coerce").max())
+    if not np.isfinite(visible_low) or not np.isfinite(visible_high):
+        return zones
+
+    return [
+        zone
+        for zone in zones
+        if float(zone.get("lower", np.inf)) <= visible_high
+        and float(zone.get("upper", -np.inf)) >= visible_low
+    ]
+
+
+def _render_zone_profile(
+    *,
+    zones: list[dict],
+    replay_date,
+    visible_start,
+    visible_end,
+    visible_price_low: float,
+    visible_price_high: float,
+    total_snapshot_count: int,
+) -> None:
+    st.markdown("### Zone Profile")
+    st.caption(
+        "Visible chart window: "
+        f"{pd.Timestamp(visible_start).date()} to {pd.Timestamp(visible_end).date()} · "
+        f"price {visible_price_low:.2f} - {visible_price_high:.2f} · "
+        f"replay {pd.Timestamp(replay_date).date()}"
+    )
+
+    if not zones:
+        st.info(
+            f"No zone snapshots intersect the current visible price range. "
+            f"Total snapshots loaded for this replay date: {total_snapshot_count}."
+        )
+        return
+
+    profile_frame = _zone_profile_frame(zones)
+    total_touches = int(profile_frame["touch_count"].sum())
+    total_breaks = int(profile_frame["break_count"].sum())
+    total_confirmed = int(profile_frame["confirmed_breakout_count"].sum())
+    total_failed = int(profile_frame["failed_breakout_count"].sum())
+
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("Visible Zones", str(len(profile_frame)), f"{total_snapshot_count} loaded")
+    metric_cols[1].metric("Touches", str(total_touches))
+    metric_cols[2].metric("Breaks", str(total_breaks))
+    metric_cols[3].metric("Confirmed", str(total_confirmed))
+    metric_cols[4].metric("Failed", str(total_failed))
+
+    status_counts = (
+        profile_frame.groupby(["zone_status", "current_role"], dropna=False)
+        .size()
+        .reset_index(name="zone_count")
+        .sort_values(["zone_status", "current_role"], kind="stable")
+    )
+    count_totals = pd.DataFrame(
+        [
+            {
+                "touch_count": total_touches,
+                "break_count": total_breaks,
+                "false_break_count": int(profile_frame["false_break_count"].sum()),
+                "close_inside_count": int(profile_frame["close_inside_count"].sum()),
+                "confirmed_breakout_count": total_confirmed,
+                "failed_breakout_count": total_failed,
+                "retest_num": int(profile_frame["retest_num"].sum()),
+            }
+        ]
+    )
+
+    status_col, count_col = st.columns([1.2, 2.0])
+    with status_col:
+        st.markdown("#### Status")
+        st.dataframe(status_counts, use_container_width=True, hide_index=True)
+    with count_col:
+        st.markdown("#### Counts")
+        st.dataframe(count_totals, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Zones")
+    st.dataframe(profile_frame, use_container_width=True, hide_index=True)
+
+
+def _zone_profile_frame(zones: list[dict]) -> pd.DataFrame:
+    frame = zones_to_dataframe(zones)
+    if frame.empty:
+        return frame
+
+    columns = [
+        "zone_status",
+        "current_role",
+        "zone_kind",
+        "lower",
+        "upper",
+        "center",
+        "distance_atr",
+        "source_types_label",
+        "timeframe_sources",
+        "touch_count",
+        "break_count",
+        "false_break_count",
+        "close_inside_count",
+        "confirmed_breakout_count",
+        "failed_breakout_count",
+        "retest_num",
+        "zone_id",
+    ]
+    for column in columns:
+        if column not in frame.columns:
+            frame[column] = 0 if column.endswith("_count") or column == "retest_num" else ""
+
+    numeric_columns = [
+        "lower",
+        "upper",
+        "center",
+        "distance_atr",
+        "touch_count",
+        "break_count",
+        "false_break_count",
+        "close_inside_count",
+        "confirmed_breakout_count",
+        "failed_breakout_count",
+        "retest_num",
+    ]
+    for column in numeric_columns:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+
+    frame = frame.loc[:, columns].sort_values(
+        ["distance_atr", "zone_status", "current_role"],
+        kind="stable",
+        na_position="last",
+    )
+    return frame.reset_index(drop=True)
 
 
 def _format_zone_metric(zone: dict | None) -> str:

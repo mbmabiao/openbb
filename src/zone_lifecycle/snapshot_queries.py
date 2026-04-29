@@ -33,7 +33,6 @@ def load_replay_zone_snapshots(
         .join(Zone, Zone.zone_id == ZoneDailySnapshot.zone_id)
         .where(ZoneDailySnapshot.symbol == str(symbol).strip().upper())
         .where(ZoneDailySnapshot.snapshot_ts == replay_ts)
-        .where(ZoneDailySnapshot.zone_status.in_(ACTIVE_ZONE_STATUSES))
     ).all()
 
     zones = [
@@ -43,8 +42,9 @@ def load_replay_zone_snapshots(
     ]
     zones.sort(key=_sort_key)
 
-    resistance = [zone for zone in zones if zone.get("side") == ZoneRole.RESISTANCE]
-    support = [zone for zone in zones if zone.get("side") == ZoneRole.SUPPORT]
+    active_zones = [zone for zone in zones if zone.get("zone_status") in ACTIVE_ZONE_STATUSES]
+    resistance = [zone for zone in active_zones if zone.get("side") == ZoneRole.RESISTANCE]
+    support = [zone for zone in active_zones if zone.get("side") == ZoneRole.SUPPORT]
     if max_resistance_zones is not None:
         resistance = resistance[: int(max_resistance_zones)]
     if max_support_zones is not None:

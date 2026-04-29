@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from data.market_data import clean_price_history_frame, fetch_price_history, to_dataframe
-from engines.zone_generation import ZoneGenerationConfig, make_replay_zone_provider
+from data.market_data import clean_price_history_frame, fetch_price_history, normalise_ohlcv_columns, to_dataframe
+from engines.zone_generation import ZoneGenerationConfig, make_preloaded_zone_provider
 from .repository import create_session_factory
 from .warmup import LifecycleWarmupResult, ensure_symbol_lifecycle_ready
 
@@ -47,10 +47,18 @@ def build_zone_snapshots_offline(
     if price_df.empty:
         raise ValueError(f"No price history returned for {normalized_symbol}")
 
-    zone_provider = make_replay_zone_provider(
+    interval_cache = _build_interval_cache(
+        symbol=normalized_symbol,
+        provider=provider,
+        fetch_start=fetch_start,
+        query_end_ts=query_end_ts,
+        daily_price_df=price_df,
+    )
+    zone_provider = make_preloaded_zone_provider(
         symbol=normalized_symbol,
         provider=provider,
         config=config,
+        interval_frames=interval_cache,
         include_all_candidates=True,
     )
     Session = create_session_factory(database_url)
@@ -75,3 +83,84 @@ def build_zone_snapshots_offline(
         end_date=end_ts,
         lifecycle=lifecycle,
     )
+
+
+def _build_interval_cache(
+    *,
+    symbol: str,
+    provider: str | None,
+    fetch_start: pd.Timestamp,
+    query_end_ts: pd.Timestamp,
+    daily_price_df: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
+    return {
+        "5m": _fetch_interval_frame(
+            symbol=symbol,
+            provider=provider,
+            start_ts=fetch_start,
+            end_ts=query_end_ts,
+            interval="5m",
+        ),
+        "1d": _prepare_daily_interval_frame(daily_price_df),
+    }
+
+
+def _fetch_interval_frame(
+    *,
+    symbol: str,
+    provider: str | None,
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    interval: str,
+) -> pd.DataFrame:
+    try:
+        raw = fetch_price_history(
+            symbol_value=symbol,
+            start_date_value=str(pd.Timestamp(start_ts).date()),
+            end_date_value=str(pd.Timestamp(end_ts).date()),
+            provider_value=provider,
+            interval_value=interval,
+            adjustment_value="splits_only",
+            extended_hours_value=False,
+        )
+    except Exception:
+        return pd.DataFrame()
+
+    frame = _prepare_interval_frame(to_dataframe(raw))
+    if frame.empty:
+        return frame
+
+    start_norm = pd.Timestamp(start_ts).normalize()
+    end_norm = pd.Timestamp(end_ts).normalize()
+    row_dates = pd.to_datetime(frame["date"]).dt.normalize()
+    return frame.loc[(row_dates >= start_norm) & (row_dates <= end_norm)].copy().reset_index(drop=True)
+
+
+def _prepare_daily_interval_frame(price_df: pd.DataFrame) -> pd.DataFrame:
+    if price_df.empty:
+        return pd.DataFrame()
+    columns = ["date", "open", "high", "low", "close", "volume"]
+    frame = price_df.copy()
+    for column in columns:
+        if column not in frame.columns:
+            frame[column] = 0.0 if column == "volume" else pd.NA
+    return _prepare_interval_frame(frame.loc[:, columns])
+
+
+def _prepare_interval_frame(raw_df: pd.DataFrame | None) -> pd.DataFrame:
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame()
+
+    frame = normalise_ohlcv_columns(raw_df)
+    required_columns = {"date", "open", "high", "low", "close", "volume"}
+    if not required_columns.issubset(set(frame.columns)):
+        return pd.DataFrame()
+
+    frame = frame.loc[:, ["date", "open", "high", "low", "close", "volume"]].copy()
+    for column in ["open", "high", "low", "close", "volume"]:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame = frame.dropna(subset=["date", "open", "high", "low", "close", "volume"]).copy()
+    if frame.empty:
+        return pd.DataFrame()
+    return frame.sort_values("date", kind="stable").reset_index(drop=True)

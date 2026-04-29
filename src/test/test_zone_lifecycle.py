@@ -19,7 +19,13 @@ from zone_lifecycle.repository import create_session_factory
 from zone_lifecycle.service import ZoneSnapshotInput, record_zone_snapshot, upsert_zone
 from zone_lifecycle.snapshot_queries import load_replay_zone_snapshots
 from zone_lifecycle.warmup import ensure_symbol_lifecycle_ready
-from engines.zone_generation import ZoneGenerationConfig, generate_zones_for_replay, make_replay_zone_provider
+from engines.zone_generation import (
+    ZoneGenerationConfig,
+    generate_zones_for_replay,
+    make_preloaded_interval_history_loader,
+    make_preloaded_zone_provider,
+    make_replay_zone_provider,
+)
 from features.boundaries import merge_close_zones
 
 
@@ -669,6 +675,47 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
         self.assertEqual(result.processed_bars, len(prices))
         self.assertGreater(zone_count, 0)
         self.assertGreater(snapshot_count, 0)
+
+    def test_preloaded_interval_loader_slices_local_frames(self) -> None:
+        prices = self._zone_generation_prices()
+        loader = make_preloaded_interval_history_loader({"5m": prices, "1d": prices})
+        selected_dates = [pd.Timestamp("2025-10-03"), pd.Timestamp("2025-10-05")]
+
+        five_min = loader("AAPL", selected_dates, "yfinance", "5m")
+        daily = loader("AAPL", selected_dates, "yfinance", "1d")
+        missing = loader("AAPL", selected_dates, "yfinance", "15m")
+
+        self.assertEqual(pd.to_datetime(five_min["date"]).dt.normalize().nunique(), 2)
+        self.assertEqual(pd.to_datetime(daily["date"]).dt.normalize().nunique(), 2)
+        self.assertTrue(missing.empty)
+
+    def test_preloaded_zone_provider_uses_cached_interval_frames(self) -> None:
+        prices = self._zone_generation_prices()
+        provider = make_preloaded_zone_provider(
+            symbol="AAPL",
+            provider="unused-provider",
+            config=ZoneGenerationConfig(
+                vp_lookback_days=20,
+                vp_bins=20,
+                weekly_vp_lookback=20,
+                weekly_vp_bins=10,
+                zone_expand_pct=0.001,
+                hv_node_quantile=0.8,
+                merge_pct=0.002,
+                max_resistance_zones=4,
+                max_support_zones=4,
+                reaction_lookahead=3,
+                reaction_return_threshold=0.01,
+                min_touch_gap=2,
+            ),
+            interval_frames={"5m": prices, "1d": prices},
+            include_all_candidates=True,
+        )
+
+        zones = provider(prices, None)
+
+        self.assertGreater(len(zones), 0)
+        self.assertTrue(all("zone_id" in zone for zone in zones))
 
     def _build_composite_dashboard_zone(self) -> dict:
         return merge_close_zones(
