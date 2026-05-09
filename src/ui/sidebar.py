@@ -15,10 +15,10 @@ class DashboardControls:
     news_provider: str | None
     history_range: str
     news_limit: int
-    vp_lookback_days: int
-    vp_bins: int
-    weekly_vp_lookback: int
-    weekly_vp_bins: int
+    short_vp_lookback_days: int
+    short_vp_bins: int
+    long_vp_lookback_days: int
+    long_vp_bins: int
     zone_expand_bp: int
     zone_expand_pct: float
     hv_node_quantile_pct: int
@@ -39,6 +39,22 @@ class DashboardControls:
     show_live_last_bar_on_chart: bool
     initial_visible_bars: int
 
+    @property
+    def vp_lookback_days(self) -> int:
+        return self.short_vp_lookback_days
+
+    @property
+    def vp_bins(self) -> int:
+        return self.short_vp_bins
+
+    @property
+    def weekly_vp_lookback(self) -> int:
+        return self.long_vp_lookback_days
+
+    @property
+    def weekly_vp_bins(self) -> int:
+        return self.long_vp_bins
+
 
 def render_sidebar(defaults: SidebarDefaults | None = None) -> DashboardControls:
     defaults = defaults or SidebarDefaults()
@@ -58,26 +74,19 @@ def render_sidebar(defaults: SidebarDefaults | None = None) -> DashboardControls
     st.sidebar.markdown("---")
     st.sidebar.subheader("Institutional Zone Settings")
 
-    vp_bins = st.sidebar.slider(
-        "Composite VP price bins",
+    short_vp_bins = st.sidebar.slider(
+        "Short VP price bins",
         min_value=20,
         max_value=120,
-        value=defaults.vp_bins,
+        value=defaults.short_vp_bins,
         step=4,
     )
-    weekly_vp_lookback = st.sidebar.slider(
-        "Weekly volume profile lookback bars",
+    long_vp_bins = st.sidebar.slider(
+        "Long VP price bins",
         min_value=20,
-        max_value=156,
-        value=defaults.weekly_vp_lookback,
+        max_value=120,
+        value=defaults.long_vp_bins,
         step=4,
-    )
-    weekly_vp_bins = st.sidebar.slider(
-        "Weekly volume profile price bins",
-        min_value=10,
-        max_value=60,
-        value=defaults.weekly_vp_bins,
-        step=2,
     )
     zone_expand_bp = st.sidebar.slider(
         "Zone expand (bp)",
@@ -133,36 +142,11 @@ def render_sidebar(defaults: SidebarDefaults | None = None) -> DashboardControls
     )
 
     st.sidebar.markdown("---")
-    st.sidebar.subheader("Reaction Validation")
-
-    reaction_lookahead = st.sidebar.slider(
-        "Reaction lookahead bars",
-        min_value=1,
-        max_value=15,
-        value=defaults.reaction_lookahead,
-        step=1,
-    )
-    reaction_threshold_bp = st.sidebar.slider(
-        "Strong reaction threshold (bp)",
-        min_value=20,
-        max_value=800,
-        value=defaults.reaction_threshold_bp,
-        step=10,
-    )
-    min_touch_gap = st.sidebar.slider(
-        "Minimum bars between distinct touches",
-        min_value=1,
-        max_value=20,
-        value=defaults.min_touch_gap,
-        step=1,
-    )
-
-    st.sidebar.markdown("---")
     st.sidebar.subheader("Bar Handling")
 
-    exclude_last_unclosed_bar = st.sidebar.checkbox(
-        "Exclude latest unclosed bar from calculations",
-        value=defaults.exclude_last_unclosed_bar,
+    include_latest_bar_in_calculations = st.sidebar.checkbox(
+        "Include latest bar in calculations",
+        value=not defaults.exclude_last_unclosed_bar,
     )
     show_live_last_bar_on_chart = st.sidebar.checkbox(
         "Show latest live bar on chart",
@@ -176,10 +160,10 @@ def render_sidebar(defaults: SidebarDefaults | None = None) -> DashboardControls
         news_provider=news_provider,
         history_range=history_range,
         news_limit=news_limit,
-        vp_lookback_days=defaults.vp_lookback_days,
-        vp_bins=vp_bins,
-        weekly_vp_lookback=weekly_vp_lookback,
-        weekly_vp_bins=weekly_vp_bins,
+        short_vp_lookback_days=defaults.short_vp_lookback_days,
+        short_vp_bins=short_vp_bins,
+        long_vp_lookback_days=defaults.long_vp_lookback_days,
+        long_vp_bins=long_vp_bins,
         zone_expand_bp=zone_expand_bp,
         zone_expand_pct=zone_expand_bp / 10000.0,
         hv_node_quantile_pct=hv_node_quantile_pct,
@@ -192,11 +176,11 @@ def render_sidebar(defaults: SidebarDefaults | None = None) -> DashboardControls
         show_all_candidate_zones=show_all_candidate_zones,
         show_atr_bands=show_atr_bands,
         atr_multiplier=atr_multiplier,
-        reaction_lookahead=reaction_lookahead,
-        reaction_threshold_bp=reaction_threshold_bp,
-        reaction_return_threshold=reaction_threshold_bp / 10000.0,
-        min_touch_gap=min_touch_gap,
-        exclude_last_unclosed_bar=exclude_last_unclosed_bar,
+        reaction_lookahead=defaults.reaction_lookahead,
+        reaction_threshold_bp=defaults.reaction_threshold_bp,
+        reaction_return_threshold=defaults.reaction_threshold_bp / 10000.0,
+        min_touch_gap=defaults.min_touch_gap,
+        exclude_last_unclosed_bar=not include_latest_bar_in_calculations,
         show_live_last_bar_on_chart=show_live_last_bar_on_chart,
         initial_visible_bars=defaults.initial_visible_bars,
     )

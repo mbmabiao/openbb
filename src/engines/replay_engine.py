@@ -45,12 +45,7 @@ def prepare_replay_frame(
     plot_mask = plot_dates <= replay_timestamp
     df_plot_replay = df_plot.loc[plot_mask].copy().reset_index(drop=True)
 
-    prior_calc_dates = calc_dates[calc_dates < replay_timestamp]
-    if prior_calc_dates.empty:
-        df_calc_replay = df_calc.iloc[0:0].copy().reset_index(drop=True)
-    else:
-        calc_cutoff = prior_calc_dates.max()
-        calc_mask = calc_dates <= calc_cutoff
-        df_calc_replay = df_calc.loc[calc_mask].copy().reset_index(drop=True)
+    calc_mask = calc_dates <= replay_timestamp
+    df_calc_replay = df_calc.loc[calc_mask].copy().reset_index(drop=True)
 
     return df_plot_replay, df_calc_replay

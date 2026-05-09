@@ -7,6 +7,7 @@ import streamlit as st
 from data.market_data import (
     fetch_interval_history_for_dates,
     get_missing_ohlc_columns,
+    get_recent_trading_dates,
     load_price_history_frame,
 )
 from engines.replay_engine import prepare_plot_and_calc_frames, prepare_replay_frame
@@ -59,11 +60,14 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             show_last_bar_on_chart=controls.show_live_last_bar_on_chart,
         )
         if df_calc_daily_base.empty:
-            st.warning("Calculation frame is empty after excluding the latest bar.")
+            st.warning("Calculation frame is empty after applying bar-handling settings.")
             return
 
         get_replay_date_state(df_calc_daily_base, controls.symbol)
-        replay_date = render_replay_controls(df_calc_daily_base, controls.symbol)
+        vap_window, replay_date = _render_vap_and_replay_controls(
+            df_calc=df_calc_daily_base,
+            symbol=controls.symbol,
+        )
         df_plot_replay, df_calc_daily = prepare_replay_frame(df_plot, df_calc_daily_base, replay_date)
         if df_calc_daily.empty:
             st.warning("No calculation data available on or before the selected replay date.")
@@ -93,14 +97,6 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             show_atr_bands=controls.show_atr_bands,
             atr_multiplier=controls.atr_multiplier,
         )
-        vap_profile_df, vap_caption = _build_display_vap_profile(
-            symbol=controls.symbol,
-            provider=controls.price_provider,
-            df_calc_daily=df_calc_daily,
-            lookback_bars=controls.vp_lookback_days,
-            bins=controls.vp_bins,
-        )
-
         Session = create_session_factory()
         with Session() as session:
             snapshot_zones = load_replay_zone_snapshots(
@@ -133,12 +129,26 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
                 current_price=current_price,
             )
         with right_col:
+            vap_lookback_bars = (
+                controls.short_vp_lookback_days if vap_window == "short" else controls.long_vp_lookback_days
+            )
+            vap_bins = controls.short_vp_bins if vap_window == "short" else controls.long_vp_bins
+            vap_profile_df, vap_caption = _build_display_vap_profile(
+                symbol=controls.symbol,
+                provider=controls.price_provider,
+                df_calc_daily=df_calc_daily,
+                lookback_bars=vap_lookback_bars,
+                bins=vap_bins,
+                window_label=vap_window,
+            )
             render_lwc_chart_with_focus_header(
                 chart_options=build_chart_options(),
                 series=chart_series,
-                chart_key=f"lwc_{controls.symbol}_{pd.Timestamp(replay_date).strftime('%Y%m%d')}",
+                chart_key=f"lwc_{controls.symbol}_{pd.Timestamp(replay_date).strftime('%Y%m%d')}_{vap_window}",
                 volume_profile_data=build_volume_profile_overlay_data(vap_profile_df),
             )
+            if not vap_profile_df.empty:
+                st.caption(vap_caption)
 
         if not support_zones and not resistance_zones:
             st.info(
@@ -147,9 +157,6 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             )
         else:
             st.caption("Zones are loaded from zone_daily_snapshots. The dashboard does not warm up or write zones.")
-        if not vap_profile_df.empty:
-            st.caption(vap_caption)
-
         if controls.show_atr_bands:
             if np.isfinite(atr20_value):
                 st.caption(
@@ -217,6 +224,53 @@ def _build_atr_overlay(
     }
 
 
+def _render_vap_and_replay_controls(*, df_calc: pd.DataFrame, symbol: str) -> tuple[str, pd.Timestamp]:
+    col_vap, col_spacer, col_prev, col_date, col_next = st.columns([2.4, 2.8, 1.0, 1.45, 1.0])
+    with col_vap:
+        vap_window = _render_vap_window_control(symbol=symbol)
+    with col_prev:
+        st.markdown("<div style='height: 1.72rem;'></div>", unsafe_allow_html=True)
+    with col_date:
+        st.markdown("<div style='height: 1.72rem;'></div>", unsafe_allow_html=True)
+    with col_next:
+        st.markdown("<div style='height: 1.72rem;'></div>", unsafe_allow_html=True)
+
+    replay_date = render_replay_controls(
+        df_calc,
+        symbol,
+        columns=(col_prev, col_date, col_next),
+        show_caption=False,
+    )
+    return vap_window, replay_date
+
+
+def _render_vap_window_control(*, symbol: str) -> str:
+    key = f"vap_window_{symbol}"
+    options = ["short", "long"]
+    labels = {"short": "Short VAP", "long": "Long VAP"}
+    if key not in st.session_state:
+        st.session_state[key] = "long"
+
+    if hasattr(st, "segmented_control"):
+        selected = st.segmented_control(
+            "VAP window",
+            options=options,
+            format_func=lambda value: labels[value],
+            key=key,
+        )
+        return str(selected or st.session_state.get(key) or "long")
+
+    return str(
+        st.radio(
+            "VAP window",
+            options=options,
+            format_func=lambda value: labels[value],
+            horizontal=True,
+            key=key,
+        )
+    )
+
+
 def _build_display_vap_profile(
     *,
     symbol: str,
@@ -224,26 +278,22 @@ def _build_display_vap_profile(
     df_calc_daily: pd.DataFrame,
     lookback_bars: int,
     bins: int,
+    window_label: str,
 ) -> tuple[pd.DataFrame, str]:
     required = {"date", "open", "high", "low", "close", "volume"}
     if df_calc_daily.empty or not required.issubset(set(df_calc_daily.columns)):
         return pd.DataFrame(), ""
 
-    source = df_calc_daily.tail(max(int(lookback_bars), 1)).copy()
-    source_dates = pd.to_datetime(source["date"], errors="coerce").dt.normalize()
-    today = pd.Timestamp.today().normalize()
-    live_daily_dates = {today, today - pd.Timedelta(days=1)}
-    recent_5m_dates = [
-        pd.Timestamp(value).normalize()
-        for value in source_dates.dropna().drop_duplicates()
-        if pd.Timestamp(value).normalize() in live_daily_dates
-    ]
+    trading_dates = get_recent_trading_dates(df_calc_daily, lookback_bars)
+    source_dates_all = pd.to_datetime(df_calc_daily["date"], errors="coerce").dt.normalize()
+    source = df_calc_daily.loc[source_dates_all.isin(set(trading_dates))].copy()
+    use_5m = bool(trading_dates) and trading_dates[-1] <= pd.Timestamp.today().normalize()
 
-    if recent_5m_dates:
+    if use_5m:
         try:
             interval_source = fetch_interval_history_for_dates(
                 symbol_value=symbol,
-                trading_dates=recent_5m_dates,
+                trading_dates=trading_dates,
                 provider_value=provider,
                 interval_value="5m",
             )
@@ -252,38 +302,36 @@ def _build_display_vap_profile(
 
         if not interval_source.empty:
             interval_dates = pd.to_datetime(interval_source["date"], errors="coerce").dt.normalize()
-            replaced_dates = set(interval_dates.dropna().unique())
-            daily_source = source.loc[~source_dates.isin(replaced_dates)].copy()
-            composite_source = pd.concat([daily_source, interval_source], ignore_index=True, sort=False)
-            profile_df = _build_vap_profile_from_source(
-                source=composite_source,
-                bins=bins,
-                source_label="VAP (daily + latest 5m)",
-                source_mode="daily_with_latest_5m",
-            )
-            if not profile_df.empty:
-                replaced_date_labels = ", ".join(
-                    str(pd.Timestamp(value).date()) for value in sorted(replaced_dates)
+            interval_date_set = {pd.Timestamp(value).normalize() for value in interval_dates.dropna().unique()}
+            if set(trading_dates).issubset(interval_date_set):
+                profile_df = _build_vap_profile_from_source(
+                    source=interval_source,
+                    bins=bins,
+                    source_label=f"VAP ({window_label}, {int(lookback_bars)} trading days, 5m)",
+                    source_mode="display_5m",
                 )
+                if profile_df.empty:
+                    return pd.DataFrame(), ""
                 return (
                     profile_df,
-                    "VAP/POC overlay uses daily OHLCV, with only the latest dates replaced by 5m bars "
-                    f"({replaced_date_labels}): {len(daily_source)} daily bars + "
-                    f"{len(interval_source)} 5m bars / {int(profile_df['source_bars'].max())} source bars / "
+                    f"{window_label.title()} VAP/POC overlay uses 5m OHLCV for the recent "
+                    f"{int(lookback_bars)} trading days: "
+                    f"{len(interval_source)} bars / "
                     f"{len(profile_df)} bins.",
                 )
 
     profile_df = _build_vap_profile_from_source(
         source=source,
         bins=bins,
-        source_label="VAP (local daily)",
+        source_label=f"VAP ({window_label}, {int(lookback_bars)} trading days, 1d)",
         source_mode="local_daily_replay",
     )
     if profile_df.empty:
         return pd.DataFrame(), ""
     return (
         profile_df,
-        "VAP/POC overlay uses local daily OHLCV: "
+        f"{window_label.title()} VAP/POC overlay uses local daily OHLCV for the recent "
+        f"{int(lookback_bars)} trading days: "
         f"{int(profile_df['source_bars'].max())} bars / {len(profile_df)} bins.",
     )
 
@@ -452,6 +500,7 @@ def _zone_profile_frame(zones: list[dict]) -> pd.DataFrame:
         "lower",
         "upper",
         "center",
+        "center_volume",
         "distance_atr",
         "source_types_label",
         "timeframe_sources",
@@ -466,12 +515,13 @@ def _zone_profile_frame(zones: list[dict]) -> pd.DataFrame:
     ]
     for column in columns:
         if column not in frame.columns:
-            frame[column] = 0 if column.endswith("_count") or column == "retest_num" else ""
+            frame[column] = 0 if column.endswith("_count") or column in {"retest_num", "center_volume"} else ""
 
     numeric_columns = [
         "lower",
         "upper",
         "center",
+        "center_volume",
         "distance_atr",
         "touch_count",
         "break_count",

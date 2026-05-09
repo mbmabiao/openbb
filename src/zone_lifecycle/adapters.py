@@ -58,6 +58,7 @@ def upsert_dashboard_zone(
         origin_event_id=zone.get("origin_event_id") or zone.get("anchor_name"),
         origin_event_type=zone.get("origin_event_type") or zone.get("anchor_family"),
         vp_window_type=zone.get("vp_window_type") or zone.get("source_label"),
+        vp_structure_key=zone.get("vp_structure_key") or zone.get("origin_event_id"),
         merged_from_zone_ids=merged_from_zone_ids,
         metadata=metadata,
         observed_ts=observed_ts,

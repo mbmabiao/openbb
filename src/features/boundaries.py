@@ -78,7 +78,9 @@ def create_candidate_zones_from_vp(
         enriched["avwap_strength"] = 0.0
         enriched["side"] = "resistance" if zone["center"] >= current_price else "support"
         enriched["zone_kind"] = ZoneKind.VP
-        enriched["vp_window_type"] = str(zone.get("source_label") or zone.get("type") or "vp")
+        enriched["vp_window_type"] = str(
+            zone.get("vp_window_type") or zone.get("source_label") or zone.get("type") or "vp"
+        )
         output.append(_with_identity_metadata(enriched, symbol=symbol))
     return output
 
@@ -125,6 +127,7 @@ def merge_close_zones(
             new_upper = max(previous["upper"], zone["upper"])
             timeframes = set(previous.get("timeframes", set())) | set(zone.get("timeframes", set()))
             source_types = set(previous.get("source_types", set())) | set(zone.get("source_types", set()))
+            inherited_zone_id = _existing_composite_zone_id(previous, zone)
             merged_zone = {
                 "type": f"merged_{previous['side']}",
                 "side": previous["side"],
@@ -144,6 +147,8 @@ def merge_close_zones(
                 "merged_from_zone_ids": _collect_source_zone_ids(previous, zone),
                 "source_components": _collect_source_components(previous, zone),
             }
+            if inherited_zone_id:
+                merged_zone["zone_id"] = inherited_zone_id
             merged[-1] = _with_identity_metadata(merged_zone, symbol=symbol)
         else:
             merged.append(zone.copy())
@@ -151,42 +156,14 @@ def merge_close_zones(
     return merged
 
 
-def compute_inventory_zone_score(
-    zone: dict,
-    current_price: float,
-    vp_df_daily: pd.DataFrame,
-    vp_df_weekly: pd.DataFrame,
-) -> float:
-    zone_volume = float(zone.get("vp_volume", 0.0))
-    daily_max = _max_profile_volume(vp_df_daily)
-    weekly_max = _max_profile_volume(vp_df_weekly)
-    max_volume = max(daily_max, weekly_max, 1.0)
-
-    volume_score = zone_volume / max_volume
-    distance_pct = abs(zone["center"] - current_price) / max(current_price, 1e-9)
-    proximity_score = 1.0 / max(distance_pct, 0.01)
-    weekly_bonus = 0.25 if "W" in zone.get("timeframes", set()) else 0.0
-    multi_tf_bonus = 0.35 if len(zone.get("timeframes", set())) >= 2 else 0.0
-    return 0.5 * volume_score + 0.3 * proximity_score + weekly_bonus + multi_tf_bonus
-
-
 def assign_zone_display_labels(zones: list[dict], prefix: str) -> list[dict]:
     if not zones:
         return []
 
-    ranked_by_distance = sorted(
-        zones,
-        key=lambda zone: (
-            zone.get("distance_pct", float("inf")),
-            abs(float(zone.get("center", 0.0))),
-        ),
-    )
-    label_map = {id(zone): f"{prefix}{index}" for index, zone in enumerate(ranked_by_distance, start=1)}
-
     labeled: list[dict] = []
-    for zone in zones:
+    for index, zone in enumerate(zones, start=1):
         zone_copy = zone.copy()
-        zone_copy["display_label"] = label_map[id(zone)]
+        zone_copy["display_label"] = f"{prefix}{index}"
         labeled.append(zone_copy)
     return labeled
 
@@ -202,23 +179,12 @@ def zones_to_dataframe(zones: list[dict]) -> pd.DataFrame:
                 "center",
                 "timeframe_sources",
                 "source_types_label",
-                "confluence_count",
+                "center_volume",
                 "vp_volume",
                 "anchor_count",
                 "avwap_strength",
                 "touch_count",
-                "first_touch_score",
-                "strong_reaction_rate",
-                "reclaim_rate",
-                "reaction_score",
-                "distance_pct",
                 "width_pct",
-                "vp_strength",
-                "inventory_score",
-                "weekly_bonus",
-                "multi_tf_bonus",
-                "structural_score",
-                "institutional_score",
             ]
         )
 
@@ -231,19 +197,9 @@ def zones_to_dataframe(zones: list[dict]) -> pd.DataFrame:
     return frame
 
 
-def _max_profile_volume(vp_df: pd.DataFrame) -> float:
-    if vp_df.empty or "volume" not in vp_df.columns:
-        return 1.0
-    values = pd.to_numeric(vp_df["volume"], errors="coerce")
-    max_value = values.max()
-    if pd.isna(max_value):
-        return 1.0
-    return max(float(max_value), 1e-9)
-
-
 def _with_identity_metadata(zone: dict, symbol: str | None) -> dict:
     zone_copy = zone.copy()
-    if symbol:
+    if symbol and not zone_copy.get("zone_id"):
         zone_copy["zone_id"] = _generate_zone_id(symbol=symbol, zone=zone_copy)
     if "zone_id" in zone_copy:
         zone_copy.setdefault("source_zone_ids", [zone_copy["zone_id"]])
@@ -264,6 +220,7 @@ def _generate_zone_id(symbol: str, zone: dict) -> str:
             origin_bar=zone.get("origin_bar") or zone.get("anchor_start_date"),
             origin_event_id=zone.get("origin_event_id") or zone.get("anchor_name"),
             vp_window_type=zone.get("vp_window_type") or zone.get("source_label"),
+            vp_structure_key=zone.get("vp_structure_key") or zone.get("origin_event_id"),
             merged_from_zone_ids=tuple(zone.get("merged_from_zone_ids") or ()),
         )
     )
@@ -280,7 +237,10 @@ def _format_timeframe(value) -> str:
 def _collect_source_zone_ids(*zones: dict) -> list[str]:
     ids: list[str] = []
     for zone in zones:
-        zone_ids = zone.get("source_zone_ids") or ([zone["zone_id"]] if zone.get("zone_id") else [])
+        if zone.get("zone_kind") == ZoneKind.COMPOSITE and zone.get("merged_from_zone_ids"):
+            zone_ids = zone.get("merged_from_zone_ids") or []
+        else:
+            zone_ids = zone.get("source_zone_ids") or ([zone["zone_id"]] if zone.get("zone_id") else [])
         ids.extend(str(zone_id) for zone_id in zone_ids if str(zone_id).strip())
     return sorted(set(ids))
 
@@ -297,6 +257,13 @@ def _collect_source_components(*zones: dict) -> list[dict]:
             else:
                 anonymous_components.append(component)
     return [*anonymous_components, *[components_by_id[key] for key in sorted(components_by_id)]]
+
+
+def _existing_composite_zone_id(*zones: dict) -> str | None:
+    for zone in zones:
+        if zone.get("zone_kind") == ZoneKind.COMPOSITE and zone.get("zone_id"):
+            return str(zone["zone_id"])
+    return None
 
 
 def _component_payload(zone: dict) -> dict:
@@ -319,5 +286,7 @@ def _component_payload(zone: dict) -> dict:
         "origin_event_id",
         "origin_event_type",
         "vp_window_type",
+        "vp_structure_key",
+        "vp_source_interval",
     ]
     return {key: zone[key] for key in keys if key in zone}

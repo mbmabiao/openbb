@@ -67,42 +67,28 @@ def show_definitions(controls: DashboardControls) -> None:
     st.markdown("### Definitions")
     st.markdown(
         f"""
-**This version adds multi-timeframe confluence, reaction validation, and replay mode.**
+**This version uses simplified volume-first zone ranking and replay mode.**
 
-**1) Daily and Weekly Zones**
-- Daily VP input: recent **{controls.vp_lookback_days}** trading days of **1h OHLCV**
-- Higher-timeframe VP input: recent **{controls.weekly_vp_lookback}** weekly windows of **1d OHLCV**
+**1) AVWAP Zones and VP Windows**
+- VP short window: recent **{controls.short_vp_lookback_days} trading days**; uses **5m OHLCV** when complete intraday data is available for every trading day in the window, otherwise **1d OHLCV**
+- VP long window: recent **{controls.long_vp_lookback_days} trading days**; uses the same **5m-or-1d** source selection rule
 - Composite VP method: each source bar distributes volume across all covered price bins
-- No fallback to lower-precision VP when the required source interval is unavailable
-- Each zone explicitly records timeframe source(s)
+- If complete 5m data is not available for a recent window, that VP window is rebuilt from 1d OHLCV
+- AVWAP still records daily/weekly timeframe source(s); VP records short/long window source(s)
 
 **2) Multi-timeframe confluence**
 - Daily and weekly zones are merged when close or overlapping
-- Zones with both **D** and **W** sources get a confluence bonus
 
-**3) Reaction validation**
-For each zone, the system tracks:
-- touch count
-- first-touch quality
-- strong reaction rate
-- reclaim rate
-- repeated-test decay
+**3) Zone ranking**
+- For each candidate zone, the system sums historical volume from bars that overlap the fixed band around zone center: **center +/- {controls.zone_expand_pct:.2%}**
+- Support and resistance lists are ordered only by that cumulative center-band volume
 
-**4) Institutional score**
-Combines:
-- volume structure
-- inventory logic
-- AVWAP contribution
-- timeframe confluence
-- historical reaction quality
-- width penalty
-
-**5) Replay mode**
+**4) Replay mode**
 - choose any historical trading date
 - treat that selected date as "today" for all calculations
 - buttons and date input are synchronized
 
-**6) Latest bar handling**
+**5) Latest bar handling**
 - chart frame: {"show live last bar" if controls.show_live_last_bar_on_chart else "hide live last bar"}
 - calculation frame: {"exclude latest bar" if controls.exclude_last_unclosed_bar else "include latest bar"}
 """

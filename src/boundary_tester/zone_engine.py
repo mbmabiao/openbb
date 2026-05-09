@@ -101,10 +101,8 @@ def build_zone_rows_from_snapshot(
                 "source_reason": zone.get("source_types_label") or zone.get("source_label", ""),
                 "confluence_count": max(len(source_types), 1),
                 "metadata": {
-                    "institutional_score": float(zone.get("institutional_score", 0.0)),
-                    "structural_score": float(zone.get("structural_score", 0.0)),
+                    "center_volume": float(zone.get("center_volume", 0.0)),
                     "touch_count": int(zone.get("touch_count", 0)),
-                    "reaction_score": float(zone.get("reaction_score", 0.0)),
                     "source_label": zone.get("source_label", ""),
                     "source_types": sorted(source_types),
                     "timeframes": sorted(timeframes),

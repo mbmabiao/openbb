@@ -398,6 +398,7 @@ def render_lwc_chart_with_focus_header(
   .lwc-zone-label {{
     position: absolute;
     left: 8px;
+    z-index: 2;
     transform: translateY(-50%);
     padding: 2px 6px;
     border-radius: 999px;
@@ -414,6 +415,7 @@ def render_lwc_chart_with_focus_header(
     position: absolute;
     left: 0;
     right: 64px;
+    z-index: 1;
     min-height: 2px;
     pointer-events: none;
   }}
@@ -515,6 +517,14 @@ def render_lwc_chart_with_focus_header(
   const volumeProfilePanel = document.getElementById("{container_id}-volume-profile-panel");
   const volumeProfile = document.getElementById("{container_id}-volume-profile");
   const chartNode = document.getElementById("{container_id}-chart");
+  const priceScaleRightOffset = 64;
+
+  const getProfilePanelWidth = () => {{
+    const chartWidth = chartNode.clientWidth || root.clientWidth || 900;
+    return Math.max(Math.min(chartWidth * 0.2, 196), 108);
+  }};
+
+  const getZoneBandRightOffset = () => priceScaleRightOffset + getProfilePanelWidth();
 
   const normalizeTime = (value) => {{
     if (typeof value === "string") {{
@@ -648,19 +658,25 @@ def render_lwc_chart_with_focus_header(
     }}
 
     zoneLabels.innerHTML = "";
+    const coordinateSeries = primaryPriceSeries || zoneLabelSeries[0]?.series;
+    if (!coordinateSeries) {{
+      return;
+    }}
+
     zoneLabelSeries.forEach((item) => {{
-      const upperY = item.series.priceToCoordinate(item.upper);
-      const lowerY = item.series.priceToCoordinate(item.lower);
+      const upperY = coordinateSeries.priceToCoordinate(item.upper);
+      const lowerY = coordinateSeries.priceToCoordinate(item.lower);
       if (item.fillColor && Number.isFinite(upperY) && Number.isFinite(lowerY)) {{
         const band = document.createElement("div");
         band.className = "lwc-zone-band";
         band.style.top = `${{Math.min(upperY, lowerY)}}px`;
         band.style.height = `${{Math.max(Math.abs(lowerY - upperY), 2)}}px`;
+        band.style.right = `${{getZoneBandRightOffset()}}px`;
         band.style.background = item.fillColor;
         zoneLabels.appendChild(band);
       }}
 
-      const y = item.series.priceToCoordinate(item.value);
+      const y = coordinateSeries.priceToCoordinate(item.value);
       if (!Number.isFinite(y)) {{
         return;
       }}
@@ -686,10 +702,9 @@ def render_lwc_chart_with_focus_header(
       return;
     }}
 
-    const chartWidth = chartNode.clientWidth || root.clientWidth || 900;
-    const profilePanelWidth = Math.max(Math.min(chartWidth * 0.2, 196), 108);
+    const profilePanelWidth = getProfilePanelWidth();
     const profileWidth = Math.max(profilePanelWidth - 18, 72);
-    const profilePanelRightOffset = 64;
+    const profilePanelRightOffset = priceScaleRightOffset;
 
     if (volumeProfilePanel) {{
       volumeProfilePanel.style.right = `${{profilePanelRightOffset}}px`;
@@ -783,8 +798,7 @@ def render_lwc_chart_with_focus_header(
 
   const applyRightOffsetForProfile = () => {{
     const timeScaleOptions = payload.chart?.timeScale || {{}};
-    const chartWidth = chartNode.clientWidth || root.clientWidth || 900;
-    const profilePanelWidth = Math.max(Math.min(chartWidth * 0.2, 196), 108);
+    const profilePanelWidth = getProfilePanelWidth();
     const dividerPadding = 20;
     const barSpacing = Number(timeScaleOptions.barSpacing) || 12;
     const baseRightOffset = Number(timeScaleOptions.rightOffset) || 0;
@@ -819,7 +833,10 @@ def render_lwc_chart_with_focus_header(
     renderZoneLabels();
     renderVolumeProfile();
   }});
-  window.setInterval(renderVolumeProfile, 500);
+  window.setInterval(() => {{
+    renderZoneLabels();
+    renderVolumeProfile();
+  }}, 500);
 </script>
 """
 
@@ -837,12 +854,15 @@ def render_zone_left_panel(
     if resistance_zones:
         st.markdown("**Resistance**")
         for zone in resistance_zones:
+            zone_id = zone.get("zone_id", "")
             st.markdown(
                 f"""
 <div style="margin-bottom:10px; padding:8px 10px; border-left:6px solid #cc3333; background:#fff5f5; border-radius:6px;">
     <div style="font-weight:700;">{zone.get("display_label", "")} [{zone.get("source_types_label", "")}]</div>
     <div style="font-size:12px; color:#555;">{zone.get("zone_status", "active")} · {zone.get("zone_kind", "")}</div>
     <div>{zone["lower"]:.2f} - {zone["upper"]:.2f}</div>
+    <div style="font-size:12px; color:#444;">Center {zone["center"]:.2f}</div>
+    <div style="font-size:11px; color:#777; overflow-wrap:anywhere;">ID {zone_id}</div>
     <div style="font-size:12px; color:#666;">
       T {zone.get("touch_count", 0)} · B {zone.get("break_count", 0)} · FB {zone.get("false_break_count", 0)} · CB {zone.get("confirmed_breakout_count", 0)}
     </div>
@@ -856,12 +876,15 @@ def render_zone_left_panel(
     if support_zones:
         st.markdown("**Support**")
         for zone in support_zones:
+            zone_id = zone.get("zone_id", "")
             st.markdown(
                 f"""
 <div style="margin-bottom:10px; padding:8px 10px; border-left:6px solid #2e8b57; background:#f4fff7; border-radius:6px;">
     <div style="font-weight:700;">{zone.get("display_label", "")} [{zone.get("source_types_label", "")}]</div>
     <div style="font-size:12px; color:#555;">{zone.get("zone_status", "active")} · {zone.get("zone_kind", "")}</div>
     <div>{zone["lower"]:.2f} - {zone["upper"]:.2f}</div>
+    <div style="font-size:12px; color:#444;">Center {zone["center"]:.2f}</div>
+    <div style="font-size:11px; color:#777; overflow-wrap:anywhere;">ID {zone_id}</div>
     <div style="font-size:12px; color:#666;">
       T {zone.get("touch_count", 0)} · B {zone.get("break_count", 0)} · FB {zone.get("false_break_count", 0)} · CB {zone.get("confirmed_breakout_count", 0)}
     </div>

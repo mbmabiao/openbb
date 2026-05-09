@@ -39,7 +39,8 @@ def build_zone_snapshots_offline(
     if end_ts < start_ts:
         raise ValueError("end_date must be on or after start_date")
 
-    fetch_start = start_ts - pd.DateOffset(years=max(int(lookback_years), 1))
+    normalized_lookback_years = max(int(lookback_years), 0)
+    fetch_start = start_ts - pd.DateOffset(years=normalized_lookback_years)
     query_end_ts = end_ts + pd.DateOffset(days=1)
     raw = fetch_price_history(
         symbol_value=normalized_symbol,
@@ -75,7 +76,7 @@ def build_zone_snapshots_offline(
             symbol=normalized_symbol,
             price_df=price_df,
             zone_provider=zone_provider,
-            lookback_years=lookback_years,
+            lookback_years=normalized_lookback_years,
             timeframe="1d",
             as_of_date=end_ts,
             snapshot_start_date=start_ts,
@@ -108,16 +109,47 @@ def _build_interval_cache(
     query_end_ts: pd.Timestamp,
     daily_price_df: pd.DataFrame,
 ) -> dict[str, pd.DataFrame]:
+    intraday_start = _recent_intraday_cache_start(
+        daily_price_df=daily_price_df,
+        fallback_start=fetch_start,
+        trading_days=60,
+    )
     return {
         "5m": _fetch_interval_frame(
             symbol=symbol,
             provider=provider,
-            start_ts=fetch_start,
+            start_ts=intraday_start,
             end_ts=query_end_ts,
             interval="5m",
         ),
         "1d": _prepare_daily_interval_frame(daily_price_df),
     }
+
+
+def _recent_intraday_cache_start(
+    *,
+    daily_price_df: pd.DataFrame,
+    fallback_start: pd.Timestamp,
+    trading_days: int,
+) -> pd.Timestamp:
+    fallback = pd.Timestamp(fallback_start).normalize()
+    if daily_price_df.empty or "date" not in daily_price_df.columns:
+        return max(fallback, pd.Timestamp.today().normalize() - pd.offsets.BDay(trading_days))
+
+    today = pd.Timestamp.today().normalize()
+    dates = (
+        pd.to_datetime(daily_price_df["date"], errors="coerce")
+        .dt.normalize()
+        .dropna()
+        .drop_duplicates()
+        .sort_values()
+    )
+    dates = dates.loc[dates <= today]
+    if dates.empty:
+        return max(fallback, today - pd.offsets.BDay(trading_days))
+
+    start = pd.Timestamp(dates.iloc[-min(int(trading_days), len(dates))]).normalize()
+    return max(fallback, start)
 
 
 def _fetch_interval_frame(

@@ -88,7 +88,11 @@ def ensure_symbol_lifecycle_ready(
         )
 
     state = _get_state(session, normalized_symbol, normalized_timeframe)
-    warmup_start_ts = _warmup_start(bars, as_of_ts, lookback_years)
+    warmup_start_ts = (
+        _warmup_start_from_snapshot_start(bars, snapshot_start_ts)
+        if int(lookback_years) <= 0 and snapshot_start_ts is not None
+        else _warmup_start(bars, as_of_ts, lookback_years)
+    )
     if state is None or force:
         start_ts = warmup_start_ts
     else:
@@ -132,6 +136,7 @@ def ensure_symbol_lifecycle_ready(
             )
             upserted_zone_ids.add(zone.zone_id)
             selected_zones.append(zone)
+        selected_zone_ids = {zone.zone_id for zone in selected_zones}
 
         active_zones = session.scalars(
             select(Zone)
@@ -139,7 +144,10 @@ def ensure_symbol_lifecycle_ready(
             .where(Zone.status.in_(ACTIVE_ZONE_STATUSES))
         ).all()
         matching_active_zones = [
-            zone for zone in active_zones if _timeframes_match(zone.timeframe, normalized_timeframe)
+            zone
+            for zone in active_zones
+            if _timeframes_match(zone.timeframe, normalized_timeframe)
+            or zone.zone_id in selected_zone_ids
         ]
         for zone in matching_active_zones:
             event = process_zone_bar(session, zone, bar)
@@ -152,19 +160,10 @@ def ensure_symbol_lifecycle_ready(
             bars_since_created_by_zone_id=_bars_since_origin_by_zone_id(matching_active_zones, history),
         )
 
-        snapshot_zones_by_id = {
-            zone.zone_id: zone
-            for zone in session.scalars(
-                select(Zone)
-                .where(Zone.symbol == normalized_symbol)
-            ).all()
-            if _timeframes_match(zone.timeframe, normalized_timeframe)
-            and (snapshot_start_ts is None or pd.Timestamp(bar.timestamp) >= snapshot_start_ts)
-            and pd.Timestamp(bar.timestamp) <= snapshot_end_ts
-        }
+        snapshot_zones_by_id: dict[str, Zone] = {}
         for zone in selected_zones:
             if (
-                _timeframes_match(zone.timeframe, normalized_timeframe)
+                zone.status in ACTIVE_ZONE_STATUSES
                 and (snapshot_start_ts is None or pd.Timestamp(bar.timestamp) >= snapshot_start_ts)
                 and pd.Timestamp(bar.timestamp) <= snapshot_end_ts
             ):
@@ -270,8 +269,15 @@ def _row_to_bar(row) -> BarInput:
 
 
 def _warmup_start(bars: pd.DataFrame, as_of_ts: pd.Timestamp, lookback_years: int) -> datetime:
-    requested_start = as_of_ts - pd.DateOffset(years=max(int(lookback_years), 1))
+    requested_start = as_of_ts - pd.DateOffset(years=max(int(lookback_years), 0))
     available = bars[bars["timestamp"] >= requested_start]
+    if available.empty:
+        return pd.Timestamp(bars["timestamp"].min()).to_pydatetime()
+    return pd.Timestamp(available["timestamp"].min()).to_pydatetime()
+
+
+def _warmup_start_from_snapshot_start(bars: pd.DataFrame, snapshot_start_ts: pd.Timestamp) -> datetime:
+    available = bars[bars["timestamp"] >= snapshot_start_ts]
     if available.empty:
         return pd.Timestamp(bars["timestamp"].min()).to_pydatetime()
     return pd.Timestamp(available["timestamp"].min()).to_pydatetime()

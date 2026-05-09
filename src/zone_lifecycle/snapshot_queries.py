@@ -33,6 +33,7 @@ def load_replay_zone_snapshots(
         .join(Zone, Zone.zone_id == ZoneDailySnapshot.zone_id)
         .where(ZoneDailySnapshot.symbol == str(symbol).strip().upper())
         .where(ZoneDailySnapshot.snapshot_ts == replay_ts)
+        .where(ZoneDailySnapshot.zone_status.in_(ACTIVE_ZONE_STATUSES))
     ).all()
 
     zones = [
@@ -42,9 +43,8 @@ def load_replay_zone_snapshots(
     ]
     zones.sort(key=_sort_key)
 
-    active_zones = [zone for zone in zones if zone.get("zone_status") in ACTIVE_ZONE_STATUSES]
-    resistance = [zone for zone in active_zones if zone.get("side") == ZoneRole.RESISTANCE]
-    support = [zone for zone in active_zones if zone.get("side") == ZoneRole.SUPPORT]
+    resistance = [zone for zone in zones if zone.get("side") == ZoneRole.RESISTANCE]
+    support = [zone for zone in zones if zone.get("side") == ZoneRole.SUPPORT]
     if max_resistance_zones is not None:
         resistance = resistance[: int(max_resistance_zones)]
     if max_support_zones is not None:
@@ -86,6 +86,7 @@ def _snapshot_to_dashboard_zone(*, snapshot: ZoneDailySnapshot, zone: Zone) -> d
         "vp_volume": 0.0,
         "anchor_count": 0,
         "avwap_strength": 0.0,
+        "center_volume": 0.0,
         "touch_count": zone.touch_count,
         "close_inside_count": zone.close_inside_count,
         "break_count": zone.break_count,
@@ -93,7 +94,6 @@ def _snapshot_to_dashboard_zone(*, snapshot: ZoneDailySnapshot, zone: Zone) -> d
         "confirmed_breakout_count": zone.confirmed_breakout_count,
         "failed_breakout_count": zone.failed_breakout_count,
         "retest_num": zone.retest_num,
-        "institutional_score": 0.0,
     }
 
 

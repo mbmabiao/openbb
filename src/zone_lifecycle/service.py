@@ -4,13 +4,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 import json
+import math
 from typing import Any
 
 import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .constants import ZoneRole, ZoneStatus
+from .constants import ZoneKind, ZoneRole, ZoneStatus
 from .identity import ZoneIdentityInput, generate_zone_id, infer_zone_kind
 from .models import Zone, ZoneDailySnapshot
 
@@ -38,6 +39,7 @@ def upsert_zone(
     origin_event_id: str | None = None,
     origin_event_type: str | None = None,
     vp_window_type: str | None = None,
+    vp_structure_key: str | None = None,
     merged_from_zone_ids: list[str] | tuple[str, ...] | None = None,
     metadata: dict[str, Any] | None = None,
     observed_ts=None,
@@ -48,21 +50,40 @@ def upsert_zone(
     low = float(price_low)
     high = float(price_high)
     center = (low + high) / 2.0
-    now = _coerce_datetime(observed_ts) or datetime.now(UTC).replace(tzinfo=None)
-    resolved_zone_id = zone_id or generate_zone_id(
-        ZoneIdentityInput(
-            symbol=symbol,
-            timeframe=timeframe,
-            zone_kind=resolved_kind,
-            source=tuple(normalized_source),
-            price_low=low,
-            price_high=high,
-            origin_bar=origin_bar,
-            origin_event_id=origin_event_id,
-            vp_window_type=vp_window_type,
-            merged_from_zone_ids=tuple(normalized_merged_from),
+    resolved_vp_structure_key = (
+        vp_structure_key
+        or origin_event_id
+        or (
+            _vp_price_bucket_key(vp_window_type or timeframe, center)
+            if resolved_kind == ZoneKind.VP
+            else None
         )
     )
+    now = _coerce_datetime(observed_ts) or datetime.now(UTC).replace(tzinfo=None)
+    resolved_zone_id = _find_existing_composite_zone_id(
+        session=session,
+        symbol=symbol,
+        timeframe=timeframe,
+        zone_kind=resolved_kind,
+        price_low=low,
+        price_high=high,
+    ) or zone_id
+    if not resolved_zone_id:
+        resolved_zone_id = generate_zone_id(
+            ZoneIdentityInput(
+                symbol=symbol,
+                timeframe=timeframe,
+                zone_kind=resolved_kind,
+                source=tuple(normalized_source),
+                price_low=low,
+                price_high=high,
+                origin_bar=origin_bar,
+                origin_event_id=origin_event_id,
+                vp_window_type=vp_window_type,
+                vp_structure_key=resolved_vp_structure_key,
+                merged_from_zone_ids=tuple(normalized_merged_from),
+            )
+        )
 
     zone = session.get(Zone, resolved_zone_id)
     if zone is None:
@@ -94,6 +115,8 @@ def upsert_zone(
     zone.price_high = high
     zone.price_center = center
     zone.current_role = _normalize_role(current_role)
+    zone.timeframe = str(timeframe).strip().lower()
+    zone.zone_kind = resolved_kind
     zone.source = normalized_source
     zone.updated_ts = now
     zone.vp_window_type = vp_window_type
@@ -181,6 +204,70 @@ def _snapshot_id(zone_id: str, snapshot_ts: datetime) -> str:
 
 def _normalize_source(values) -> list[str]:
     return sorted({str(value).strip().lower() for value in values if str(value).strip()})
+
+
+def _find_existing_composite_zone_id(
+    *,
+    session: Session,
+    symbol: str,
+    timeframe: str,
+    zone_kind: str,
+    price_low: float,
+    price_high: float,
+    min_iou: float = 0.8,
+) -> str | None:
+    if zone_kind != ZoneKind.COMPOSITE:
+        return None
+    incoming_low = float(price_low)
+    incoming_high = float(price_high)
+    if incoming_high < incoming_low:
+        incoming_low, incoming_high = incoming_high, incoming_low
+    if incoming_high <= incoming_low:
+        return None
+
+    normalized_symbol = str(symbol).strip().upper()
+    candidates = session.scalars(
+        select(Zone).where(
+            Zone.symbol == normalized_symbol,
+            Zone.zone_kind == ZoneKind.COMPOSITE,
+        )
+    ).all()
+
+    best_zone_id: str | None = None
+    best_center_distance = float("inf")
+    incoming_center = (incoming_low + incoming_high) / 2.0
+    for candidate in candidates:
+        iou = _price_interval_iou(
+            incoming_low,
+            incoming_high,
+            float(candidate.price_low),
+            float(candidate.price_high),
+        )
+        if iou < min_iou:
+            continue
+        center_distance = abs(float(candidate.price_center) - incoming_center)
+        if center_distance < best_center_distance:
+            best_zone_id = candidate.zone_id
+            best_center_distance = center_distance
+
+    return best_zone_id
+
+
+def _price_interval_iou(first_low: float, first_high: float, second_low: float, second_high: float) -> float:
+    low_a, high_a = sorted((float(first_low), float(first_high)))
+    low_b, high_b = sorted((float(second_low), float(second_high)))
+    intersection = max(0.0, min(high_a, high_b) - max(low_a, low_b))
+    union = max(high_a, high_b) - min(low_a, low_b)
+    if union <= 0:
+        return 0.0
+    return intersection / union
+
+
+def _vp_price_bucket_key(window_name: str, center: float, bucket_pct: float = 0.005) -> str:
+    normalized_window = str(window_name).strip().lower() or "vp"
+    center_value = max(float(center), 1e-9)
+    log_bucket = round(math.log(center_value) / math.log1p(max(float(bucket_pct), 1e-9)))
+    return f"{normalized_window}:bucket_{log_bucket}"
 
 
 def _normalize_role(value: str) -> str:

@@ -22,6 +22,7 @@ class ZoneIdentityInput:
     origin_bar: datetime | pd.Timestamp | str | None = None
     origin_event_id: str | None = None
     vp_window_type: str | None = None
+    vp_structure_key: str | None = None
     merged_from_zone_ids: tuple[str, ...] | None = None
 
 
@@ -41,19 +42,17 @@ def generate_zone_id(identity: ZoneIdentityInput) -> str:
     elif zone_kind == ZoneKind.AVWAP:
         payload = {
             "symbol": _normalize_symbol(identity.symbol),
-            "timeframe": _normalize_timeframe(identity.timeframe),
             "zone_kind": ZoneKind.AVWAP,
             "source": _normalize_string_list(identity.source),
-            "anchor_start": _normalize_timestamp(identity.origin_bar),
-            "anchor_id": identity.origin_event_id or "",
+            "anchor_date": _normalize_date(identity.origin_bar),
+            "anchor_key": identity.origin_event_id or "",
         }
     elif zone_kind == ZoneKind.VP:
         payload = {
             "symbol": _normalize_symbol(identity.symbol),
-            "timeframe": _normalize_timeframe(identity.timeframe),
             "zone_kind": ZoneKind.VP,
             "vp_window_type": identity.vp_window_type or "",
-            "source": _normalize_string_list(identity.source),
+            "vp_structure_key": identity.vp_structure_key or "",
         }
     elif zone_kind == ZoneKind.COMPOSITE:
         payload = {
@@ -105,6 +104,12 @@ def _normalize_timestamp(value) -> str | None:
     if value is None or pd.isna(value):
         return None
     return pd.Timestamp(value).isoformat()
+
+
+def _normalize_date(value) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    return pd.Timestamp(value).date().isoformat()
 
 
 def _round_price(value: float | None) -> float | None:

@@ -30,7 +30,13 @@ def get_replay_date_state(df_calc: pd.DataFrame, symbol: str) -> pd.Timestamp:
     return pd.Timestamp(st.session_state[session_key])
 
 
-def render_replay_controls(df_calc: pd.DataFrame, symbol: str) -> pd.Timestamp:
+def render_replay_controls(
+    df_calc: pd.DataFrame,
+    symbol: str,
+    *,
+    columns=None,
+    show_caption: bool = True,
+) -> pd.Timestamp:
     available_dates = [value.date() for value in list_replay_dates(df_calc)]
     if not available_dates:
         raise ValueError("No dates available for replay.")
@@ -57,7 +63,10 @@ def render_replay_controls(df_calc: pd.DataFrame, symbol: str) -> pd.Timestamp:
         new_index = min(max(index, 0), len(available_dates) - 1)
         st.session_state[session_key] = available_dates[new_index]
 
-    col_prev, col_date, col_next = st.columns([1, 2, 1])
+    if columns is None:
+        col_prev, col_date, col_next = st.columns([1, 2, 1])
+    else:
+        col_prev, col_date, col_next = columns
 
     with col_prev:
         st.button(
@@ -89,10 +98,11 @@ def render_replay_controls(df_calc: pd.DataFrame, symbol: str) -> pd.Timestamp:
         )
 
     current_index = date_to_index[st.session_state[session_key]]
-    st.caption(
-        f"Replay date: {st.session_state[session_key]} | "
-        f"Step {current_index + 1}/{len(available_dates)}"
-    )
+    if show_caption:
+        st.caption(
+            f"Replay date: {st.session_state[session_key]} | "
+            f"Step {current_index + 1}/{len(available_dates)}"
+        )
 
     return pd.Timestamp(st.session_state[session_key])
 

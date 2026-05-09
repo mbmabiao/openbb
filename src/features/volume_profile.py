@@ -118,18 +118,43 @@ def _find_confirmed_swing_points(
     return swing_highs, swing_lows
 
 
+def _volume_qualifies(
+    df: pd.DataFrame,
+    index: int,
+    lookback_bars: int = 60,
+    quantile: float = 0.8,
+) -> bool:
+    if "volume" not in df.columns or index <= 0 or not 0 <= index < len(df):
+        return False
+
+    event_volume = pd.to_numeric(pd.Series([df["volume"].iloc[index]]), errors="coerce").iloc[0]
+    if pd.isna(event_volume):
+        return False
+
+    start = max(0, index - lookback_bars)
+    history = pd.to_numeric(df["volume"].iloc[start:index], errors="coerce").dropna()
+    if history.empty:
+        return False
+
+    return float(event_volume) >= float(history.quantile(quantile))
+
+
 def find_anchor_points(
     df: pd.DataFrame,
     timeframe: str,
-    rolling_window_bars: tuple[int, ...] | None = None,
-    swing_search_bars: int = 63,
-    event_search_bars: int = 63,
+    rolling_window_bars: tuple[int | tuple[int, str], ...] | None = None,
+    swing_search_bars: int | None = None,
+    event_search_bars: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     anchors: dict[str, dict[str, Any]] = {}
     if df.empty:
         return anchors
 
-    rolling_window_bars = rolling_window_bars or (21, 63)
+    default_search_bars = 52 if str(timeframe).upper().startswith("W") else 63
+    swing_search_bars = default_search_bars if swing_search_bars is None else swing_search_bars
+    event_search_bars = default_search_bars if event_search_bars is None else event_search_bars
+    default_rolling_windows: tuple[int | tuple[int, str], ...] = () if str(timeframe).upper().startswith("W") else (21, 63)
+    rolling_window_bars = default_rolling_windows if rolling_window_bars is None else rolling_window_bars
     swing_highs, swing_lows = _find_confirmed_swing_points(
         df,
         left_bars=3,
@@ -138,29 +163,44 @@ def find_anchor_points(
         atr_period=21,
     )
 
-    for window_bars in rolling_window_bars:
+    for rolling_window in rolling_window_bars:
+        if isinstance(rolling_window, tuple):
+            window_bars = int(rolling_window[0])
+            rolling_timeframe = str(rolling_window[1])
+        else:
+            window_bars = int(rolling_window)
+            rolling_timeframe = timeframe
+
         if len(df) < window_bars:
             continue
         window_slice = df.iloc[-window_bars:]
-        anchors[f"rolling_{window_bars}_high"] = {
-            "index": int(window_slice["high"].idxmax()),
-            "anchor_family": "rolling",
-            "anchor_window_bars": window_bars,
-            "anchor_search_bars": None,
-            "timeframe": timeframe,
-        }
-        anchors[f"rolling_{window_bars}_low"] = {
-            "index": int(window_slice["low"].idxmin()),
-            "anchor_family": "rolling",
-            "anchor_window_bars": window_bars,
-            "anchor_search_bars": None,
-            "timeframe": timeframe,
-        }
+        high_index = int(window_slice["high"].idxmax())
+        low_index = int(window_slice["low"].idxmin())
+        if _volume_qualifies(df, high_index):
+            anchors[f"rolling_{window_bars}_high"] = {
+                "index": high_index,
+                "anchor_family": "rolling",
+                "anchor_window_bars": window_bars,
+                "anchor_search_bars": None,
+                "timeframe": rolling_timeframe,
+            }
+        if _volume_qualifies(df, low_index):
+            anchors[f"rolling_{window_bars}_low"] = {
+                "index": low_index,
+                "anchor_family": "rolling",
+                "anchor_window_bars": window_bars,
+                "anchor_search_bars": None,
+                "timeframe": rolling_timeframe,
+            }
 
     swing_search_bars = min(max(int(swing_search_bars), 1), len(df))
     swing_window_start = len(df) - swing_search_bars
-    recent_swing_highs = [idx for idx in swing_highs if idx >= swing_window_start]
-    recent_swing_lows = [idx for idx in swing_lows if idx >= swing_window_start]
+    recent_swing_highs = [
+        idx for idx in swing_highs if idx >= swing_window_start and _volume_qualifies(df, idx)
+    ]
+    recent_swing_lows = [
+        idx for idx in swing_lows if idx >= swing_window_start and _volume_qualifies(df, idx)
+    ]
 
     if recent_swing_highs:
         anchors["recent_swing_high"] = {
@@ -196,19 +236,29 @@ def find_anchor_points(
         }
 
     event_search_bars = min(max(int(event_search_bars), 1), len(df))
+    volume_qualified = pd.Series(
+        [_volume_qualifies(df, index) for index in range(len(df))],
+        index=df.index,
+    )
     previous_close = df["close"].shift(1)
     gap_pct = (df["open"] - previous_close) / previous_close.replace(0, np.nan)
-    gap_slice = gap_pct.iloc[-event_search_bars:]
-    if gap_slice.notna().sum() > 0:
+    gap_up_slice = gap_pct.where(
+        (df["open"] > previous_close) & (df["close"] > previous_close) & volume_qualified
+    ).iloc[-event_search_bars:]
+    gap_down_slice = gap_pct.where(
+        (df["open"] < previous_close) & (df["close"] < previous_close) & volume_qualified
+    ).iloc[-event_search_bars:]
+    if gap_down_slice.notna().sum() > 0:
         anchors["gap_down"] = {
-            "index": int(gap_slice.idxmin()),
+            "index": int(gap_down_slice.idxmin()),
             "anchor_family": "event",
             "anchor_window_bars": None,
             "anchor_search_bars": event_search_bars,
             "timeframe": timeframe,
         }
+    if gap_up_slice.notna().sum() > 0:
         anchors["gap_up"] = {
-            "index": int(gap_slice.idxmax()),
+            "index": int(gap_up_slice.idxmax()),
             "anchor_family": "event",
             "anchor_window_bars": None,
             "anchor_search_bars": event_search_bars,
@@ -216,7 +266,7 @@ def find_anchor_points(
         }
 
     body_return = (df["close"] - df["open"]) / df["open"].replace(0, np.nan)
-    body_slice = body_return.iloc[-event_search_bars:]
+    body_slice = body_return.where(volume_qualified).iloc[-event_search_bars:]
     if body_slice.notna().sum() > 0:
         anchors["big_down"] = {
             "index": int(body_slice.idxmin()),
@@ -247,6 +297,7 @@ def build_vp_zones_from_profile(
     hv_quantile: float,
     timeframe: str,
     source_label: str,
+    vp_window_type: str | None = None,
 ) -> tuple[list[dict], pd.DataFrame]:
     if vp_df.empty:
         return [], vp_df
@@ -282,6 +333,7 @@ def build_vp_zones_from_profile(
 
         center = (current_left + current_right) / 2.0
         expand = center * zone_expand
+        structure_key = _vp_structure_key(vp_window_type or timeframe, center)
         zones.append(
             {
                 "type": f"vp_zone_{timeframe}",
@@ -293,6 +345,9 @@ def build_vp_zones_from_profile(
                 "source_types": {f"vp_{timeframe}"},
                 "primary_timeframe": timeframe,
                 "source_label": source_label,
+                "vp_window_type": vp_window_type or timeframe,
+                "vp_structure_key": structure_key,
+                "origin_event_id": structure_key,
             }
         )
 
@@ -302,6 +357,7 @@ def build_vp_zones_from_profile(
 
     center = (current_left + current_right) / 2.0
     expand = center * zone_expand
+    structure_key = _vp_structure_key(vp_window_type or timeframe, center)
     zones.append(
         {
             "type": f"vp_zone_{timeframe}",
@@ -313,10 +369,21 @@ def build_vp_zones_from_profile(
             "source_types": {f"vp_{timeframe}"},
             "primary_timeframe": timeframe,
             "source_label": source_label,
+            "vp_window_type": vp_window_type or timeframe,
+            "vp_structure_key": structure_key,
+            "origin_event_id": structure_key,
         }
     )
 
     return zones, profile_df
+
+
+def _vp_structure_key(window_name: str, center: float, bucket_pct: float = 0.005) -> str:
+    normalized_window = str(window_name).strip().lower() or "vp"
+    center_value = max(float(center), 1e-9)
+    bucket_step = max(float(bucket_pct), 1e-9)
+    bucket = round(np.log(center_value) / np.log1p(bucket_step))
+    return f"{normalized_window}:bucket_{bucket}"
 
 
 def build_composite_interval_volume_profile_zones(
@@ -327,6 +394,7 @@ def build_composite_interval_volume_profile_zones(
     timeframe: str,
     source_label: str | None = None,
     source_mode: str = "composite",
+    vp_window_type: str | None = None,
 ) -> tuple[list[dict], pd.DataFrame]:
     if interval_df.empty or bins < 1:
         return [], pd.DataFrame()
@@ -425,23 +493,31 @@ def build_composite_interval_volume_profile_zones(
         hv_quantile=hv_quantile,
         timeframe=timeframe,
         source_label=source_label or f"VP ({timeframe}, composite)",
+        vp_window_type=vp_window_type,
     )
 
 
-def build_avwap_features(df: pd.DataFrame, timeframe: str) -> tuple[pd.DataFrame, dict]:
+def build_avwap_features(
+    df: pd.DataFrame,
+    timeframe: str,
+    rolling_window_bars: tuple[int | tuple[int, str], ...] | None = None,
+    swing_search_bars: int | None = None,
+    event_search_bars: int | None = None,
+) -> tuple[pd.DataFrame, dict]:
     anchors = find_anchor_points(
         df,
         timeframe=timeframe,
-        rolling_window_bars=(21, 63),
-        swing_search_bars=63,
-        event_search_bars=63,
+        rolling_window_bars=rolling_window_bars,
+        swing_search_bars=swing_search_bars,
+        event_search_bars=event_search_bars,
     )
     avwap_columns: dict[str, pd.Series] = {}
     anchor_meta: dict[str, dict] = {}
 
     for anchor_name, source_meta in anchors.items():
         index = int(source_meta["index"])
-        column_name = f"avwap_{timeframe}_{anchor_name}"
+        anchor_timeframe = str(source_meta["timeframe"])
+        column_name = f"avwap_{anchor_timeframe}_{anchor_name}"
         avwap_columns[column_name] = compute_vwap(df, index)
         anchor_meta[column_name] = {
             "anchor_name": anchor_name,
@@ -449,7 +525,7 @@ def build_avwap_features(df: pd.DataFrame, timeframe: str) -> tuple[pd.DataFrame
             "start_idx": index,
             "start_date": df.loc[index, "date"],
             "start_price": float(df.loc[index, "close"]),
-            "timeframe": timeframe,
+            "timeframe": anchor_timeframe,
             "anchor_window_bars": source_meta.get("anchor_window_bars"),
             "anchor_search_bars": source_meta.get("anchor_search_bars"),
         }
