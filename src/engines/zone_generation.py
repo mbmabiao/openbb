@@ -68,8 +68,8 @@ class ZoneGenerationConfig:
     ) -> None:
         object.__setattr__(self, "short_vp_lookback_days", int(short_vp_lookback_days or vp_lookback_days or 21))
         object.__setattr__(self, "short_vp_bins", int(short_vp_bins or vp_bins or 48))
-        object.__setattr__(self, "long_vp_lookback_days", int(long_vp_lookback_days or weekly_vp_lookback or 63))
-        object.__setattr__(self, "long_vp_bins", int(long_vp_bins or weekly_vp_bins or self.short_vp_bins))
+        object.__setattr__(self, "long_vp_lookback_days", int(long_vp_lookback_days or weekly_vp_lookback or vp_lookback_days or 63))
+        object.__setattr__(self, "long_vp_bins", int(long_vp_bins or weekly_vp_bins or vp_bins or self.short_vp_bins))
         object.__setattr__(self, "zone_expand_pct", float(zone_expand_pct))
         object.__setattr__(self, "hv_node_quantile", float(hv_node_quantile))
         object.__setattr__(self, "merge_pct", float(merge_pct))
@@ -81,11 +81,11 @@ class ZoneGenerationConfig:
 
     @property
     def vp_lookback_days(self) -> int:
-        return self.short_vp_lookback_days
+        return self.long_vp_lookback_days
 
     @property
     def vp_bins(self) -> int:
-        return self.short_vp_bins
+        return self.long_vp_bins
 
     @property
     def weekly_vp_lookback(self) -> int:
@@ -122,7 +122,7 @@ class GeneratedZoneSet:
 
     @property
     def daily_vp_context(self) -> VolumeProfileContext:
-        return self.short_vp_context
+        return self.long_vp_context
 
     @property
     def weekly_vp_context(self) -> VolumeProfileContext:
@@ -246,31 +246,10 @@ def generate_zones_for_replay(
         df_calc_daily,
         timeframe="D",
         rolling_window_bars=(
-            (config.short_vp_lookback_days, "short"),
             (config.long_vp_lookback_days, "long"),
         ),
     )
-    short_vp_dates = get_recent_trading_dates(
-        df_calc_daily,
-        config.short_vp_lookback_days,
-    )
-    short_vp_context = _load_window_volume_profile_context(
-        symbol=symbol,
-        provider=provider,
-        df_calc_daily=df_calc_daily,
-        trading_dates=short_vp_dates,
-        window_name="short",
-        lookback_days=config.short_vp_lookback_days,
-        bins=config.short_vp_bins,
-        zone_expand_pct=config.zone_expand_pct,
-        hv_node_quantile=config.hv_node_quantile,
-        interval_history_loader=interval_history_loader,
-    )
-    short_vp_zones = create_candidate_zones_from_vp(
-        df=df_calc_daily_with_features,
-        vp_zones=short_vp_context.zones_raw,
-        symbol=symbol,
-    )
+    short_vp_context = _disabled_volume_profile_context("short")
     long_vp_dates = get_recent_trading_dates(
         df_calc_daily,
         config.long_vp_lookback_days,
@@ -315,7 +294,7 @@ def generate_zones_for_replay(
     )
 
     all_candidate_zones = merge_close_zones(
-        short_vp_zones + long_vp_zones + daily_avwap_zones + weekly_avwap_zones,
+        long_vp_zones + daily_avwap_zones + weekly_avwap_zones,
         merge_pct=config.merge_pct,
         symbol=symbol,
     )
@@ -480,6 +459,17 @@ def _load_window_volume_profile_context(
         source_df=source_df,
         zones_raw=zones_raw,
         profile_df=profile_df,
+    )
+
+
+def _disabled_volume_profile_context(window_name: str) -> VolumeProfileContext:
+    normalized_window = str(window_name).strip().lower() or "vp"
+    return VolumeProfileContext(
+        mode=f"{normalized_window} disabled",
+        note=f"{normalized_window.title()} VP is disabled; zone generation uses only the fixed long VP window.",
+        source_df=pd.DataFrame(),
+        zones_raw=[],
+        profile_df=pd.DataFrame(),
     )
 
 

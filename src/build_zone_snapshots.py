@@ -22,10 +22,10 @@ def main() -> None:
     )
     parser.add_argument("--no-force", action="store_true", help="Process incrementally instead of rebuilding the range.")
     parser.add_argument("--reset", action="store_true", help="Delete existing lifecycle data for the symbol before rebuilding.")
-    parser.add_argument("--short-vp-lookback-days", type=int, default=21)
-    parser.add_argument("--short-vp-bins", type=int, default=48)
     parser.add_argument("--long-vp-lookback-days", type=int, default=63)
     parser.add_argument("--long-vp-bins", type=int, default=48)
+    parser.add_argument("--short-vp-lookback-days", type=int, default=21, help=argparse.SUPPRESS)
+    parser.add_argument("--short-vp-bins", type=int, default=48, help=argparse.SUPPRESS)
     parser.add_argument("--vp-lookback-days", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--vp-bins", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--weekly-vp-lookback", type=int, default=None, help=argparse.SUPPRESS)
@@ -51,10 +51,10 @@ def main() -> None:
         force=not args.no_force,
         reset=args.reset,
         config=ZoneGenerationConfig(
-            short_vp_lookback_days=args.vp_lookback_days or args.short_vp_lookback_days,
-            short_vp_bins=args.vp_bins or args.short_vp_bins,
-            long_vp_lookback_days=args.weekly_vp_lookback or args.long_vp_lookback_days,
-            long_vp_bins=args.weekly_vp_bins or args.long_vp_bins,
+            short_vp_lookback_days=args.short_vp_lookback_days,
+            short_vp_bins=args.short_vp_bins,
+            long_vp_lookback_days=args.vp_lookback_days or args.weekly_vp_lookback or args.long_vp_lookback_days,
+            long_vp_bins=args.vp_bins or args.weekly_vp_bins or args.long_vp_bins,
             zone_expand_pct=args.zone_expand_bp / 10000.0,
             hv_node_quantile=args.hv_node_quantile,
             merge_pct=args.merge_bp / 10000.0,

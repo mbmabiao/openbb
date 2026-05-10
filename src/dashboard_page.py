@@ -64,7 +64,7 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             return
 
         get_replay_date_state(df_calc_daily_base, controls.symbol)
-        vap_window, replay_date = _render_vap_and_replay_controls(
+        replay_date = _render_vap_and_replay_controls(
             df_calc=df_calc_daily_base,
             symbol=controls.symbol,
         )
@@ -129,22 +129,18 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
                 current_price=current_price,
             )
         with right_col:
-            vap_lookback_bars = (
-                controls.short_vp_lookback_days if vap_window == "short" else controls.long_vp_lookback_days
-            )
-            vap_bins = controls.short_vp_bins if vap_window == "short" else controls.long_vp_bins
             vap_profile_df, vap_caption = _build_display_vap_profile(
                 symbol=controls.symbol,
                 provider=controls.price_provider,
                 df_calc_daily=df_calc_daily,
-                lookback_bars=vap_lookback_bars,
-                bins=vap_bins,
-                window_label=vap_window,
+                lookback_bars=controls.long_vp_lookback_days,
+                bins=controls.long_vp_bins,
+                window_label="long",
             )
             render_lwc_chart_with_focus_header(
                 chart_options=build_chart_options(),
                 series=chart_series,
-                chart_key=f"lwc_{controls.symbol}_{pd.Timestamp(replay_date).strftime('%Y%m%d')}_{vap_window}",
+                chart_key=f"lwc_{controls.symbol}_{pd.Timestamp(replay_date).strftime('%Y%m%d')}_long_vp",
                 volume_profile_data=build_volume_profile_overlay_data(vap_profile_df),
             )
             if not vap_profile_df.empty:
@@ -224,10 +220,10 @@ def _build_atr_overlay(
     }
 
 
-def _render_vap_and_replay_controls(*, df_calc: pd.DataFrame, symbol: str) -> tuple[str, pd.Timestamp]:
-    col_vap, col_spacer, col_prev, col_date, col_next = st.columns([2.4, 2.8, 1.0, 1.45, 1.0])
-    with col_vap:
-        vap_window = _render_vap_window_control(symbol=symbol)
+def _render_vap_and_replay_controls(*, df_calc: pd.DataFrame, symbol: str) -> pd.Timestamp:
+    col_label, col_spacer, col_prev, col_date, col_next = st.columns([2.4, 2.8, 1.0, 1.45, 1.0])
+    with col_label:
+        st.caption("VAP window: Long")
     with col_prev:
         st.markdown("<div style='height: 1.72rem;'></div>", unsafe_allow_html=True)
     with col_date:
@@ -241,34 +237,7 @@ def _render_vap_and_replay_controls(*, df_calc: pd.DataFrame, symbol: str) -> tu
         columns=(col_prev, col_date, col_next),
         show_caption=False,
     )
-    return vap_window, replay_date
-
-
-def _render_vap_window_control(*, symbol: str) -> str:
-    key = f"vap_window_{symbol}"
-    options = ["short", "long"]
-    labels = {"short": "Short VAP", "long": "Long VAP"}
-    if key not in st.session_state:
-        st.session_state[key] = "long"
-
-    if hasattr(st, "segmented_control"):
-        selected = st.segmented_control(
-            "VAP window",
-            options=options,
-            format_func=lambda value: labels[value],
-            key=key,
-        )
-        return str(selected or st.session_state.get(key) or "long")
-
-    return str(
-        st.radio(
-            "VAP window",
-            options=options,
-            format_func=lambda value: labels[value],
-            horizontal=True,
-            key=key,
-        )
-    )
+    return replay_date
 
 
 def _build_display_vap_profile(

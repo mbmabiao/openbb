@@ -43,11 +43,11 @@ class SidebarDefaults:
 
     @property
     def vp_lookback_days(self) -> int:
-        return self.short_vp_lookback_days
+        return self.long_vp_lookback_days
 
     @property
     def vp_bins(self) -> int:
-        return self.short_vp_bins
+        return self.long_vp_bins
 
     @property
     def weekly_vp_lookback(self) -> int:

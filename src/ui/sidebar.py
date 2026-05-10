@@ -41,11 +41,11 @@ class DashboardControls:
 
     @property
     def vp_lookback_days(self) -> int:
-        return self.short_vp_lookback_days
+        return self.long_vp_lookback_days
 
     @property
     def vp_bins(self) -> int:
-        return self.short_vp_bins
+        return self.long_vp_bins
 
     @property
     def weekly_vp_lookback(self) -> int:
@@ -74,15 +74,8 @@ def render_sidebar(defaults: SidebarDefaults | None = None) -> DashboardControls
     st.sidebar.markdown("---")
     st.sidebar.subheader("Institutional Zone Settings")
 
-    short_vp_bins = st.sidebar.slider(
-        "Short VP price bins",
-        min_value=20,
-        max_value=120,
-        value=defaults.short_vp_bins,
-        step=4,
-    )
     long_vp_bins = st.sidebar.slider(
-        "Long VP price bins",
+        "VP price bins",
         min_value=20,
         max_value=120,
         value=defaults.long_vp_bins,
@@ -161,7 +154,7 @@ def render_sidebar(defaults: SidebarDefaults | None = None) -> DashboardControls
         history_range=history_range,
         news_limit=news_limit,
         short_vp_lookback_days=defaults.short_vp_lookback_days,
-        short_vp_bins=short_vp_bins,
+        short_vp_bins=defaults.short_vp_bins,
         long_vp_lookback_days=defaults.long_vp_lookback_days,
         long_vp_bins=long_vp_bins,
         zone_expand_bp=zone_expand_bp,

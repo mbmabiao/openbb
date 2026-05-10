@@ -70,11 +70,10 @@ def show_definitions(controls: DashboardControls) -> None:
 **This version uses simplified volume-first zone ranking and replay mode.**
 
 **1) AVWAP Zones and VP Windows**
-- VP short window: recent **{controls.short_vp_lookback_days} trading days**; uses **5m OHLCV** when complete intraday data is available for every trading day in the window, otherwise **1d OHLCV**
-- VP long window: recent **{controls.long_vp_lookback_days} trading days**; uses the same **5m-or-1d** source selection rule
+- VP window: recent **{controls.long_vp_lookback_days} trading days**; uses **5m OHLCV** when complete intraday data is available for every trading day in the window, otherwise **1d OHLCV**
 - Composite VP method: each source bar distributes volume across all covered price bins
-- If complete 5m data is not available for a recent window, that VP window is rebuilt from 1d OHLCV
-- AVWAP still records daily/weekly timeframe source(s); VP records short/long window source(s)
+- If complete 5m data is not available for the window, VP is rebuilt from 1d OHLCV
+- AVWAP still records daily/weekly timeframe source(s); VP records the fixed long window source
 
 **2) Multi-timeframe confluence**
 - Daily and weekly zones are merged when close or overlapping

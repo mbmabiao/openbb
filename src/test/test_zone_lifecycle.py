@@ -960,8 +960,8 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
         self.assertTrue(
             all("zone_id" in zone and "zone_kind" in zone for zone in generated.all_candidate_zones)
         )
-        self.assertEqual(generated.short_vp_context.mode, "short 21 trading days 1d")
-        self.assertGreater(len(generated.short_vp_context.zones_raw), 0)
+        self.assertEqual(generated.short_vp_context.mode, "short disabled")
+        self.assertEqual(generated.short_vp_context.zones_raw, [])
         self.assertGreater(len(generated.long_vp_context.zones_raw), 0)
         self.assertIsInstance(generated.support_zones, list)
         self.assertIsInstance(generated.resistance_zones, list)
@@ -1023,14 +1023,14 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             interval_history_loader=loader,
         )
 
-        self.assertEqual(generated.short_vp_context.mode, "short 21 trading days 5m")
+        self.assertEqual(generated.short_vp_context.mode, "short disabled")
         self.assertEqual(generated.long_vp_context.mode, "long 63 trading days 5m")
         self.assertEqual(
             sorted({source for zone in generated.all_candidate_zones for source in zone.get("source_types", set()) if source.startswith("vp_")}),
-            ["vp_long", "vp_short"],
+            ["vp_long"],
         )
 
-    def test_rolling_avwap_uses_short_long_trading_day_windows(self) -> None:
+    def test_rolling_avwap_uses_only_long_trading_day_window(self) -> None:
         prices = pd.DataFrame(
             [
                 {
@@ -1073,8 +1073,8 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             if source.startswith("avwap_") and source.endswith("_rolling")
         }
 
-        self.assertIn("avwap_short_rolling", rolling_sources)
         self.assertIn("avwap_long_rolling", rolling_sources)
+        self.assertNotIn("avwap_short_rolling", rolling_sources)
         self.assertNotIn("avwap_D_rolling", rolling_sources)
         self.assertNotIn("avwap_W_rolling", rolling_sources)
         self.assertTrue(
