@@ -12,7 +12,10 @@ from data.market_data import (
 )
 from engines.replay_engine import prepare_plot_and_calc_frames, prepare_replay_frame
 from features.boundaries import zones_to_dataframe
-from features.volume_profile import build_composite_interval_volume_profile_zones, compute_atr
+from features.volume_profile import (
+    build_composite_interval_volume_profile_zones,
+    compute_atr,
+)
 from plotting.chart_builder import (
     build_chart_options,
     build_lwc_series,
@@ -22,7 +25,11 @@ from plotting.chart_builder import (
 )
 from ui.sidebar import DashboardControls
 from ui.state import get_replay_date_state, render_replay_controls
-from zone_lifecycle import create_session_factory, load_replay_zone_snapshots
+from zone_lifecycle.breakout_event_queries import load_breakout_events
+from zone_lifecycle.divergence_event_queries import load_divergence_events
+from zone_lifecycle.pattern_event_queries import load_pattern_events
+from zone_lifecycle.repository import create_session_factory
+from zone_lifecycle.snapshot_queries import load_replay_zone_snapshots
 
 
 def render_historical_price_tab(controls: DashboardControls) -> None:
@@ -97,54 +104,73 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
             show_atr_bands=controls.show_atr_bands,
             atr_multiplier=controls.atr_multiplier,
         )
+        ema_overlay = _build_ema_overlay(
+            df_calc_daily=df_calc_daily,
+            visible_start=df_plot_display["date"].iloc[0],
+            visible_end=df_plot_display["date"].iloc[-1],
+            show_ema20=controls.show_ema20_line,
+            show_ema50=controls.show_ema50_line,
+        )
         Session = create_session_factory()
         with Session() as session:
             snapshot_zones = load_replay_zone_snapshots(
                 session,
                 symbol=controls.symbol,
                 replay_date=replay_date,
-                max_support_zones=controls.max_support_zones,
-                max_resistance_zones=controls.max_resistance_zones,
+            )
+            pattern_events = load_pattern_events(
+                session,
+                symbol=controls.symbol,
+                start_time=df_plot_display["date"].iloc[0],
+                end_time=df_plot_display["date"].iloc[-1],
+            )
+            divergence_events = load_divergence_events(
+                session,
+                symbol=controls.symbol,
+                start_time=df_plot_display["date"].iloc[0],
+                end_time=df_plot_display["date"].iloc[-1],
+            )
+            breakout_events = load_breakout_events(
+                session,
+                symbol=controls.symbol,
+                start_time=df_plot_display["date"].iloc[0],
+                end_time=df_plot_display["date"].iloc[-1],
             )
         support_zones = snapshot_zones.support_zones
         resistance_zones = snapshot_zones.resistance_zones
         all_snapshot_zones = snapshot_zones.all_zones
-        visible_snapshot_zones = _filter_zones_by_visible_price_range(all_snapshot_zones, df_plot_display)
+        vap_profile_df, vap_caption = _build_display_vap_profile(
+            symbol=controls.symbol,
+            provider=controls.price_provider,
+            df_calc_daily=df_calc_daily,
+            lookback_bars=controls.long_vp_lookback_days,
+            bins=controls.long_vp_bins,
+            window_label="long",
+        )
 
         chart_series = build_lwc_series(
             df_plot=df_plot_display,
-            df_calc_daily_with_features=df_calc_daily,
             support_zones=support_zones,
             resistance_zones=resistance_zones,
-            daily_anchor_meta={},
-            show_avwap_lines=controls.show_avwap_lines,
+            pattern_events=pattern_events + divergence_events + breakout_events,
             atr_overlay=atr_overlay,
+            ema_overlay=ema_overlay,
         )
 
-        left_col, right_col = st.columns([1.15, 6.2], vertical_alignment="top")
-        with left_col:
-            render_zone_left_panel(
-                support_zones=support_zones,
-                resistance_zones=resistance_zones,
-                current_price=current_price,
-            )
-        with right_col:
-            vap_profile_df, vap_caption = _build_display_vap_profile(
-                symbol=controls.symbol,
-                provider=controls.price_provider,
-                df_calc_daily=df_calc_daily,
-                lookback_bars=controls.long_vp_lookback_days,
-                bins=controls.long_vp_bins,
-                window_label="long",
-            )
-            render_lwc_chart_with_focus_header(
-                chart_options=build_chart_options(),
-                series=chart_series,
-                chart_key=f"lwc_{controls.symbol}_{pd.Timestamp(replay_date).strftime('%Y%m%d')}_long_vp",
-                volume_profile_data=build_volume_profile_overlay_data(vap_profile_df),
-            )
-            if not vap_profile_df.empty:
-                st.caption(vap_caption)
+        render_lwc_chart_with_focus_header(
+            chart_options=build_chart_options(),
+            series=chart_series,
+            chart_key=f"lwc_{controls.symbol}_{pd.Timestamp(replay_date).strftime('%Y%m%d')}_long_vp",
+            volume_profile_data=build_volume_profile_overlay_data(vap_profile_df),
+        )
+        if not vap_profile_df.empty:
+            st.caption(vap_caption)
+
+        render_zone_left_panel(
+            support_zones=support_zones,
+            resistance_zones=resistance_zones,
+            current_price=current_price,
+        )
 
         if not support_zones and not resistance_zones:
             st.info(
@@ -175,13 +201,17 @@ def render_historical_price_tab(controls: DashboardControls) -> None:
         )
 
         _render_zone_profile(
-            zones=visible_snapshot_zones,
+            zones=all_snapshot_zones,
             replay_date=replay_date,
             visible_start=df_plot_display["date"].iloc[0],
             visible_end=df_plot_display["date"].iloc[-1],
             visible_price_low=float(df_plot_display["low"].min()),
             visible_price_high=float(df_plot_display["high"].max()),
             total_snapshot_count=len(all_snapshot_zones),
+        )
+        _render_observation_profile(
+            vap_profile_df=vap_profile_df,
+            replay_date=replay_date,
         )
     except Exception as error:
         st.error(f"Error: {error}")
@@ -218,6 +248,53 @@ def _build_atr_overlay(
             for row in atr_frame.itertuples(index=False)
         ],
     }
+
+
+def _build_ema_overlay(
+    *,
+    df_calc_daily: pd.DataFrame,
+    visible_start,
+    visible_end,
+    show_ema20: bool,
+    show_ema50: bool,
+) -> list[dict]:
+    if df_calc_daily.empty or (not show_ema20 and not show_ema50):
+        return []
+
+    frame = df_calc_daily.loc[:, ["date", "close"]].copy()
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+    frame = frame.dropna(subset=["date", "close"]).sort_values("date", kind="stable")
+    if frame.empty:
+        return []
+
+    visible_start_ts = pd.Timestamp(visible_start)
+    visible_end_ts = pd.Timestamp(visible_end)
+    overlays: list[dict] = []
+    specs = [
+        (show_ema20, 20, "EMA20", "#0891b2"),
+        (show_ema50, 50, "EMA50", "#f59e0b"),
+    ]
+    for enabled, span, label, color in specs:
+        if not enabled:
+            continue
+        values = frame.copy()
+        values["ema"] = values["close"].ewm(span=span, adjust=False, min_periods=span).mean()
+        values = values.dropna(subset=["ema"])
+        values = values[(values["date"] >= visible_start_ts) & (values["date"] <= visible_end_ts)]
+        if values.empty:
+            continue
+        overlays.append(
+            {
+                "label": label,
+                "color": color,
+                "data": [
+                    {"time": pd.Timestamp(row.date).strftime("%Y-%m-%d"), "value": float(row.ema)}
+                    for row in values.itertuples(index=False)
+                ],
+            }
+        )
+    return overlays
 
 
 def _render_vap_and_replay_controls(*, df_calc: pd.DataFrame, symbol: str) -> pd.Timestamp:
@@ -324,13 +401,10 @@ def _build_vap_profile_from_source(
     if source.empty:
         return pd.DataFrame()
 
-    _, profile_df = build_composite_interval_volume_profile_zones(
+    profile_df = build_composite_interval_volume_profile_zones(
         interval_df=source,
         bins=max(int(bins), 1),
-        zone_expand=0.0,
-        hv_quantile=0.80,
         timeframe="D",
-        source_label=source_label,
         source_mode=source_mode,
     )
     return profile_df
@@ -370,23 +444,6 @@ def _render_summary_metrics(
         col4.metric("ATR20", f"{atr20_value:.2f}", f"{atr_multiplier:.1f}x = {atr20_value * atr_multiplier:.2f}")
 
 
-def _filter_zones_by_visible_price_range(zones: list[dict], df_plot_display: pd.DataFrame) -> list[dict]:
-    if not zones or df_plot_display.empty:
-        return []
-
-    visible_low = float(pd.to_numeric(df_plot_display["low"], errors="coerce").min())
-    visible_high = float(pd.to_numeric(df_plot_display["high"], errors="coerce").max())
-    if not np.isfinite(visible_low) or not np.isfinite(visible_high):
-        return zones
-
-    return [
-        zone
-        for zone in zones
-        if float(zone.get("lower", np.inf)) <= visible_high
-        and float(zone.get("upper", -np.inf)) >= visible_low
-    ]
-
-
 def _render_zone_profile(
     *,
     zones: list[dict],
@@ -416,14 +473,12 @@ def _render_zone_profile(
     total_touches = int(profile_frame["touch_count"].sum())
     total_breaks = int(profile_frame["break_count"].sum())
     total_confirmed = int(profile_frame["confirmed_breakout_count"].sum())
-    total_failed = int(profile_frame["failed_breakout_count"].sum())
 
-    metric_cols = st.columns(5)
+    metric_cols = st.columns(4)
     metric_cols[0].metric("Visible Zones", str(len(profile_frame)), f"{total_snapshot_count} loaded")
     metric_cols[1].metric("Touches", str(total_touches))
     metric_cols[2].metric("Breaks", str(total_breaks))
     metric_cols[3].metric("Confirmed", str(total_confirmed))
-    metric_cols[4].metric("Failed", str(total_failed))
 
     status_counts = (
         profile_frame.groupby(["zone_status", "current_role"], dropna=False)
@@ -436,10 +491,8 @@ def _render_zone_profile(
             {
                 "touch_count": total_touches,
                 "break_count": total_breaks,
-                "false_break_count": int(profile_frame["false_break_count"].sum()),
                 "close_inside_count": int(profile_frame["close_inside_count"].sum()),
                 "confirmed_breakout_count": total_confirmed,
-                "failed_breakout_count": total_failed,
                 "retest_num": int(profile_frame["retest_num"].sum()),
             }
         ]
@@ -469,35 +522,33 @@ def _zone_profile_frame(zones: list[dict]) -> pd.DataFrame:
         "lower",
         "upper",
         "center",
+        "zone_strength_pct",
         "center_volume",
         "distance_atr",
         "source_types_label",
         "timeframe_sources",
         "touch_count",
         "break_count",
-        "false_break_count",
         "close_inside_count",
         "confirmed_breakout_count",
-        "failed_breakout_count",
         "retest_num",
         "zone_id",
     ]
     for column in columns:
         if column not in frame.columns:
-            frame[column] = 0 if column.endswith("_count") or column in {"retest_num", "center_volume"} else ""
+            frame[column] = 0 if column.endswith("_count") or column in {"retest_num", "center_volume", "zone_strength_pct"} else ""
 
     numeric_columns = [
         "lower",
         "upper",
         "center",
+        "zone_strength_pct",
         "center_volume",
         "distance_atr",
         "touch_count",
         "break_count",
-        "false_break_count",
         "close_inside_count",
         "confirmed_breakout_count",
-        "failed_breakout_count",
         "retest_num",
     ]
     for column in numeric_columns:
@@ -509,6 +560,38 @@ def _zone_profile_frame(zones: list[dict]) -> pd.DataFrame:
         na_position="last",
     )
     return frame.reset_index(drop=True)
+
+
+def _render_observation_profile(
+    *,
+    vap_profile_df: pd.DataFrame,
+    replay_date,
+) -> None:
+    st.markdown("#### Observation Lines")
+    rows: list[dict] = []
+    if not vap_profile_df.empty and "volume" in vap_profile_df.columns:
+        volume = pd.to_numeric(vap_profile_df["volume"], errors="coerce")
+        poc_row = vap_profile_df.loc[volume.idxmax()] if volume.notna().any() else None
+    else:
+        poc_row = None
+
+    if poc_row is not None:
+        rows.append(
+            {
+                "type": "VP_POC",
+                "label": "Long VP POC",
+                "timeframe": "long",
+                "anchor_date": "",
+                "value": float(poc_row["bin_center"]),
+                "replay_date": pd.Timestamp(replay_date).date(),
+            }
+        )
+
+    if not rows:
+        st.info("No observation lines available for this replay date.")
+        return
+
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def _format_zone_metric(zone: dict | None) -> str:

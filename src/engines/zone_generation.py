@@ -6,21 +6,20 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from config.warmup_config import ZoneGenerationThresholdConfig, load_warmup_config
 from data.market_data import (
     fetch_interval_history_for_dates,
     get_recent_trading_dates,
 )
-from engines.validation_engine import rank_zones_for_side
+from engines.validation_engine import enrich_zones_with_strength, rank_zones_for_side
 from features.boundaries import (
     assign_zone_display_labels,
-    create_candidate_zones_from_avwap,
-    create_candidate_zones_from_vp,
-    merge_close_zones,
+    create_candidate_zones_from_swing_points,
 )
 from features.volume_profile import (
-    build_avwap_features,
     build_composite_interval_volume_profile_zones,
     compute_atr,
+    find_recent_swing_points,
     resample_to_weekly,
 )
 
@@ -33,101 +32,44 @@ IntervalHistoryLoader = Callable[
 
 @dataclass(frozen=True, slots=True, init=False)
 class ZoneGenerationConfig:
-    short_vp_lookback_days: int
-    short_vp_bins: int
     long_vp_lookback_days: int
     long_vp_bins: int
     zone_expand_pct: float
-    hv_node_quantile: float
-    merge_pct: float
     max_resistance_zones: int
     max_support_zones: int
-    reaction_lookahead: int
-    reaction_return_threshold: float
-    min_touch_gap: int
+    thresholds: ZoneGenerationThresholdConfig
 
     def __init__(
         self,
         *,
-        short_vp_lookback_days: int | None = None,
-        short_vp_bins: int | None = None,
         long_vp_lookback_days: int | None = None,
         long_vp_bins: int | None = None,
-        vp_lookback_days: int | None = None,
-        vp_bins: int | None = None,
-        weekly_vp_lookback: int | None = None,
-        weekly_vp_bins: int | None = None,
         zone_expand_pct: float,
-        hv_node_quantile: float,
-        merge_pct: float,
         max_resistance_zones: int,
         max_support_zones: int,
-        reaction_lookahead: int,
-        reaction_return_threshold: float,
-        min_touch_gap: int,
+        thresholds: ZoneGenerationThresholdConfig | None = None,
     ) -> None:
-        object.__setattr__(self, "short_vp_lookback_days", int(short_vp_lookback_days or vp_lookback_days or 21))
-        object.__setattr__(self, "short_vp_bins", int(short_vp_bins or vp_bins or 48))
-        object.__setattr__(self, "long_vp_lookback_days", int(long_vp_lookback_days or weekly_vp_lookback or vp_lookback_days or 63))
-        object.__setattr__(self, "long_vp_bins", int(long_vp_bins or weekly_vp_bins or vp_bins or self.short_vp_bins))
+        resolved_thresholds = thresholds or load_warmup_config().zone_generation
+        object.__setattr__(self, "long_vp_lookback_days", int(long_vp_lookback_days or 63))
+        object.__setattr__(self, "long_vp_bins", int(long_vp_bins or 48))
         object.__setattr__(self, "zone_expand_pct", float(zone_expand_pct))
-        object.__setattr__(self, "hv_node_quantile", float(hv_node_quantile))
-        object.__setattr__(self, "merge_pct", float(merge_pct))
         object.__setattr__(self, "max_resistance_zones", int(max_resistance_zones))
         object.__setattr__(self, "max_support_zones", int(max_support_zones))
-        object.__setattr__(self, "reaction_lookahead", int(reaction_lookahead))
-        object.__setattr__(self, "reaction_return_threshold", float(reaction_return_threshold))
-        object.__setattr__(self, "min_touch_gap", int(min_touch_gap))
-
-    @property
-    def vp_lookback_days(self) -> int:
-        return self.long_vp_lookback_days
-
-    @property
-    def vp_bins(self) -> int:
-        return self.long_vp_bins
-
-    @property
-    def weekly_vp_lookback(self) -> int:
-        return self.long_vp_lookback_days
-
-    @property
-    def weekly_vp_bins(self) -> int:
-        return self.long_vp_bins
-
-
-@dataclass(frozen=True, slots=True)
-class VolumeProfileContext:
-    mode: str
-    note: str
-    source_df: pd.DataFrame
-    zones_raw: list[dict]
-    profile_df: pd.DataFrame
-
+        object.__setattr__(self, "thresholds", resolved_thresholds)
 
 @dataclass(frozen=True, slots=True)
 class GeneratedZoneSet:
     df_calc_daily_with_features: pd.DataFrame
-    df_calc_weekly_with_features: pd.DataFrame
     daily_anchor_meta: dict
-    weekly_anchor_meta: dict
-    short_vp_context: VolumeProfileContext
-    long_vp_context: VolumeProfileContext
+    long_vp_profile_df: pd.DataFrame
     all_candidate_zones: list[dict]
     resistance_zones: list[dict]
     support_zones: list[dict]
     current_price: float
     atr20_series: pd.Series
     atr20_value: float
-
-    @property
-    def daily_vp_context(self) -> VolumeProfileContext:
-        return self.long_vp_context
-
-    @property
-    def weekly_vp_context(self) -> VolumeProfileContext:
-        return self.long_vp_context
-
+    weekly_swing_points: list[dict]
+    observation_rows: list[dict]
 
 def make_replay_zone_provider(
     *,
@@ -139,6 +81,7 @@ def make_replay_zone_provider(
 ):
     def zone_provider(history: pd.DataFrame, _bar) -> list[dict]:
         if history.empty:
+            zone_provider.latest_observations = []
             return []
         generated = generate_zones_for_replay(
             symbol=symbol,
@@ -147,10 +90,12 @@ def make_replay_zone_provider(
             config=config,
             interval_history_loader=interval_history_loader,
         )
+        zone_provider.latest_observations = generated.observation_rows
         if include_all_candidates:
             return generated.all_candidate_zones
         return generated.support_zones + generated.resistance_zones
 
+    zone_provider.latest_observations = []
     return zone_provider
 
 
@@ -204,25 +149,12 @@ def make_preloaded_interval_history_loader(
 
 def config_from_controls(controls) -> ZoneGenerationConfig:
     return ZoneGenerationConfig(
-        short_vp_lookback_days=_control_value(controls, "short_vp_lookback_days", "vp_lookback_days"),
-        short_vp_bins=_control_value(controls, "short_vp_bins", "vp_bins"),
-        long_vp_lookback_days=_control_value(controls, "long_vp_lookback_days", "weekly_vp_lookback"),
-        long_vp_bins=_control_value(controls, "long_vp_bins", "weekly_vp_bins"),
+        long_vp_lookback_days=controls.long_vp_lookback_days,
+        long_vp_bins=controls.long_vp_bins,
         zone_expand_pct=controls.zone_expand_pct,
-        hv_node_quantile=controls.hv_node_quantile,
-        merge_pct=controls.merge_pct,
-        max_resistance_zones=controls.max_resistance_zones,
-        max_support_zones=controls.max_support_zones,
-        reaction_lookahead=controls.reaction_lookahead,
-        reaction_return_threshold=controls.reaction_return_threshold,
-        min_touch_gap=controls.min_touch_gap,
+        max_resistance_zones=getattr(controls, "max_resistance_zones", 999),
+        max_support_zones=getattr(controls, "max_support_zones", 999),
     )
-
-
-def _control_value(controls, preferred_name: str, legacy_name: str):
-    if hasattr(controls, preferred_name):
-        return getattr(controls, preferred_name)
-    return getattr(controls, legacy_name)
 
 
 def generate_zones_for_replay(
@@ -235,26 +167,28 @@ def generate_zones_for_replay(
 ) -> GeneratedZoneSet:
     interval_history_loader = interval_history_loader or _default_interval_history_loader
     current_price = float(df_calc_daily["close"].iloc[-1])
-    atr20_series = compute_atr(df_calc_daily, period=20)
+    atr20_series = compute_atr(df_calc_daily, period=config.thresholds.atr_period)
     atr20_value = (
         float(atr20_series.iloc[-1])
         if not atr20_series.empty and pd.notna(atr20_series.iloc[-1])
         else np.nan
     )
 
-    df_calc_daily_with_features, daily_anchor_meta = build_avwap_features(
-        df_calc_daily,
-        timeframe="D",
-        rolling_window_bars=(
-            (config.long_vp_lookback_days, "long"),
-        ),
+    df_calc_weekly = resample_to_weekly(df_calc_daily)
+    weekly_swing_points = find_recent_swing_points(
+        df_calc_weekly,
+        timeframe="W",
+        max_points_per_side=config.thresholds.weekly_swing_max_points_per_side,
+        left_bars=config.thresholds.swing_left_bars,
+        right_bars=config.thresholds.swing_right_bars,
+        volume_lookback_bars=config.thresholds.swing_volume_lookback_bars,
+        volume_quantile=config.thresholds.swing_volume_quantile,
     )
-    short_vp_context = _disabled_volume_profile_context("short")
     long_vp_dates = get_recent_trading_dates(
         df_calc_daily,
         config.long_vp_lookback_days,
     )
-    long_vp_context = _load_window_volume_profile_context(
+    long_vp_profile_df = _load_window_volume_profile(
         symbol=symbol,
         provider=provider,
         df_calc_daily=df_calc_daily,
@@ -262,41 +196,20 @@ def generate_zones_for_replay(
         window_name="long",
         lookback_days=config.long_vp_lookback_days,
         bins=config.long_vp_bins,
-        zone_expand_pct=config.zone_expand_pct,
-        hv_node_quantile=config.hv_node_quantile,
         interval_history_loader=interval_history_loader,
     )
-    long_vp_zones = create_candidate_zones_from_vp(
-        df=df_calc_daily_with_features,
-        vp_zones=long_vp_context.zones_raw,
-        symbol=symbol,
-    )
-    daily_avwap_zones = create_candidate_zones_from_avwap(
-        df=df_calc_daily_with_features,
-        anchor_meta=daily_anchor_meta,
+    swing_zones = create_candidate_zones_from_swing_points(
+        swing_points=weekly_swing_points,
         zone_expand_pct=config.zone_expand_pct,
+        current_price=current_price,
         symbol=symbol,
     )
 
-    df_calc_weekly = resample_to_weekly(df_calc_daily)
-    df_calc_weekly_with_features, weekly_anchor_meta = build_avwap_features(
-        df_calc_weekly,
-        timeframe="W",
-        rolling_window_bars=(),
-        swing_search_bars=52,
-        event_search_bars=52,
-    )
-    weekly_avwap_zones = create_candidate_zones_from_avwap(
-        df=df_calc_weekly_with_features,
-        anchor_meta=weekly_anchor_meta,
-        zone_expand_pct=config.zone_expand_pct,
-        symbol=symbol,
-    )
-
-    all_candidate_zones = merge_close_zones(
-        long_vp_zones + daily_avwap_zones + weekly_avwap_zones,
-        merge_pct=config.merge_pct,
-        symbol=symbol,
+    all_candidate_zones = enrich_zones_with_strength(
+        swing_zones,
+        price_history=df_calc_daily,
+        center_volume_pct=config.zone_expand_pct,
+        strength_lookback_weeks=config.thresholds.strength_lookback_weeks,
     )
     resistance_zones = assign_zone_display_labels(
         rank_zones_for_side(
@@ -306,6 +219,7 @@ def generate_zones_for_replay(
             max_zones=config.max_resistance_zones,
             price_history=df_calc_daily,
             center_volume_pct=config.zone_expand_pct,
+            strength_lookback_weeks=config.thresholds.strength_lookback_weeks,
         ),
         prefix="R",
     )
@@ -317,24 +231,52 @@ def generate_zones_for_replay(
             max_zones=config.max_support_zones,
             price_history=df_calc_daily,
             center_volume_pct=config.zone_expand_pct,
+            strength_lookback_weeks=config.thresholds.strength_lookback_weeks,
         ),
         prefix="S",
     )
+    observation_rows = _build_observation_rows(
+        long_vp_profile_df=long_vp_profile_df,
+    )
 
     return GeneratedZoneSet(
-        df_calc_daily_with_features=df_calc_daily_with_features,
-        df_calc_weekly_with_features=df_calc_weekly_with_features,
-        daily_anchor_meta=daily_anchor_meta,
-        weekly_anchor_meta=weekly_anchor_meta,
-        short_vp_context=short_vp_context,
-        long_vp_context=long_vp_context,
+        df_calc_daily_with_features=df_calc_daily,
+        daily_anchor_meta={},
+        long_vp_profile_df=long_vp_profile_df,
         all_candidate_zones=all_candidate_zones,
         resistance_zones=resistance_zones,
         support_zones=support_zones,
         current_price=current_price,
         atr20_series=atr20_series,
         atr20_value=atr20_value,
+        weekly_swing_points=weekly_swing_points,
+        observation_rows=observation_rows,
     )
+
+
+def _build_observation_rows(
+    *,
+    long_vp_profile_df: pd.DataFrame,
+) -> list[dict]:
+    rows: list[dict] = []
+    profile_df = long_vp_profile_df
+    if not profile_df.empty and "volume" in profile_df.columns:
+        volume = pd.to_numeric(profile_df["volume"], errors="coerce")
+        if volume.notna().any():
+            poc_row = profile_df.loc[volume.idxmax()]
+            rows.append(
+                {
+                    "observation_type": "vp_poc",
+                    "label": "long_vp_poc",
+                    "timeframe": "long",
+                    "value": float(poc_row["bin_center"]),
+                    "metadata": {
+                        "source_mode": str(poc_row.get("source_mode", "")),
+                        "source_bars": int(poc_row.get("source_bars", 0)),
+                    },
+                }
+            )
+    return rows
 
 
 def _default_interval_history_loader(
@@ -351,7 +293,7 @@ def _default_interval_history_loader(
     )
 
 
-def _load_window_volume_profile_context(
+def _load_window_volume_profile(
     *,
     symbol: str,
     provider: str | None,
@@ -360,41 +302,23 @@ def _load_window_volume_profile_context(
     window_name: str,
     lookback_days: int,
     bins: int,
-    zone_expand_pct: float,
-    hv_node_quantile: float,
     interval_history_loader: IntervalHistoryLoader,
-) -> VolumeProfileContext:
+) -> pd.DataFrame:
     required = {"date", "open", "high", "low", "close", "volume"}
     normalized_window = str(window_name).strip().lower()
-    window_label = f"{normalized_window} {int(lookback_days)} trading days"
-    unavailable_mode = f"{normalized_window} unavailable"
     if df_calc_daily.empty or not required.issubset(set(df_calc_daily.columns)) or not trading_dates:
-        return VolumeProfileContext(
-            mode=unavailable_mode,
-            note=f"{window_label} VP input history is unavailable, so this VP window was omitted.",
-            source_df=pd.DataFrame(),
-            zones_raw=[],
-            profile_df=pd.DataFrame(),
-        )
+        return pd.DataFrame()
 
     target_dates = {pd.Timestamp(value).normalize() for value in trading_dates}
     daily_dates = pd.to_datetime(df_calc_daily["date"], errors="coerce").dt.normalize()
     daily_source = df_calc_daily.loc[daily_dates.isin(target_dates)].copy()
     if daily_source.empty:
-        return VolumeProfileContext(
-            mode=unavailable_mode,
-            note=f"No daily OHLCV rows matched the {window_label} VP window, so it was omitted.",
-            source_df=pd.DataFrame(),
-            zones_raw=[],
-            profile_df=pd.DataFrame(),
-        )
+        return pd.DataFrame()
 
     sorted_target_dates = sorted(target_dates)
 
     source_df = daily_source
-    source_interval = "1d"
     source_mode = f"{normalized_window}_vp_1d"
-    mode = f"{window_label} 1d"
 
     if sorted_target_dates and sorted_target_dates[-1] <= pd.Timestamp.today().normalize():
         interval_source = pd.DataFrame()
@@ -408,69 +332,23 @@ def _load_window_volume_profile_context(
             interval_date_set = {pd.Timestamp(value).normalize() for value in interval_dates.dropna().unique()}
             if target_dates.issubset(interval_date_set):
                 source_df = interval_source
-                source_interval = "5m"
                 source_mode = f"{normalized_window}_vp_5m"
-                mode = f"{window_label} 5m"
 
     try:
-        zones_raw, profile_df = build_composite_interval_volume_profile_zones(
+        profile_df = build_composite_interval_volume_profile_zones(
             interval_df=source_df,
             bins=bins,
-            zone_expand=zone_expand_pct,
-            hv_quantile=hv_node_quantile,
             timeframe=normalized_window,
-            source_label=f"VP ({window_label}, {source_interval})",
             source_mode=source_mode,
-            vp_window_type=f"{normalized_window}_{int(lookback_days)}d",
         )
     except Exception as error:
-        return VolumeProfileContext(
-            mode=unavailable_mode,
-            note=f"{window_label} VP construction failed, so this VP window was omitted. Details: {error}",
-            source_df=source_df,
-            zones_raw=[],
-            profile_df=pd.DataFrame(),
-        )
+        del error
+        return pd.DataFrame()
 
     if profile_df.empty:
-        return VolumeProfileContext(
-            mode=unavailable_mode,
-            note=f"{window_label} VP input rows were available, but no valid profile could be built.",
-            source_df=source_df,
-            zones_raw=[],
-            profile_df=pd.DataFrame(),
-        )
+        return pd.DataFrame()
 
-    if source_interval == "5m":
-        note = (
-            f"{window_label} VP uses 5m OHLCV because complete intraday data was available "
-            f"for every trading day in the window: {len(source_df)} bars / {len(profile_df)} bins."
-        )
-    else:
-        note = (
-            f"{window_label} VP uses 1d OHLCV because complete 5m data was unavailable "
-            f"for the full trading-day window: "
-            f"{int(profile_df['source_bars'].max())} bars / {len(profile_df)} bins."
-        )
-
-    return VolumeProfileContext(
-        mode=mode,
-        note=note,
-        source_df=source_df,
-        zones_raw=zones_raw,
-        profile_df=profile_df,
-    )
-
-
-def _disabled_volume_profile_context(window_name: str) -> VolumeProfileContext:
-    normalized_window = str(window_name).strip().lower() or "vp"
-    return VolumeProfileContext(
-        mode=f"{normalized_window} disabled",
-        note=f"{normalized_window.title()} VP is disabled; zone generation uses only the fixed long VP window.",
-        source_df=pd.DataFrame(),
-        zones_raw=[],
-        profile_df=pd.DataFrame(),
-    )
+    return profile_df
 
 
 def _ensure_date_column(frame: pd.DataFrame) -> pd.DataFrame:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 import hashlib
 import json
@@ -11,12 +11,24 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from config.warmup_config import WarmupThresholdConfig, load_warmup_config
+from features.zone_strength import zone_strength_from_interval
+
 from .adapters import upsert_dashboard_zone
-from .breakout_state_machine import process_zone_bar
-from .constants import ACTIVE_ZONE_STATUSES
+from .breakout_state_machine import BreakoutStateConfig, process_zone_bar
+from .constants import ACTIVE_ZONE_STATUSES, DEPRECATED_ZONE_SOURCES, ZoneKind
+from .divergence_events import detect_macd_divergence_events_for_latest_bar
 from .lifecycle import BarInput, expire_event_zones
 from .models import SymbolLifecycleState, Zone
-from .service import ZoneSnapshotInput, record_zone_snapshot
+from .pattern_events import detect_pattern_events_for_latest_bar
+from .service import (
+    MarketObservationInput,
+    ZoneSnapshotInput,
+    record_market_observation,
+    record_divergence_event,
+    record_pattern_event,
+    record_zone_snapshot,
+)
 
 
 ZoneProvider = Callable[[pd.DataFrame, BarInput], Iterable[dict[str, Any]]]
@@ -29,6 +41,9 @@ class LifecycleWarmupResult:
     processed_bars: int
     upserted_zones: int
     snapshots: int
+    observations: int
+    pattern_events: int
+    divergence_events: int
     zone_bar_updates: int
     breakout_updates: int
     warmup_start_ts: datetime | None
@@ -41,12 +56,13 @@ def ensure_symbol_lifecycle_ready(
     symbol: str,
     price_df: pd.DataFrame,
     zone_provider: ZoneProvider,
-    lookback_years: int = 2,
+    lookback_years: int | None = None,
     timeframe: str = "1d",
     as_of_date=None,
     snapshot_start_date=None,
     snapshot_end_date=None,
     force: bool = False,
+    warmup_config: WarmupThresholdConfig | None = None,
 ) -> LifecycleWarmupResult:
     """Warm up or incrementally advance lifecycle state for one symbol.
 
@@ -56,6 +72,9 @@ def ensure_symbol_lifecycle_ready(
     """
     normalized_symbol = str(symbol).strip().upper()
     normalized_timeframe = str(timeframe).strip().lower()
+    warmup_config = warmup_config or load_warmup_config()
+    breakout_config = BreakoutStateConfig(**asdict(warmup_config.breakout))
+    lookback_years = warmup_config.lifecycle.default_lookback_years if lookback_years is None else lookback_years
     bars = _normalize_price_frame(price_df)
     if bars.empty:
         return LifecycleWarmupResult(
@@ -64,6 +83,9 @@ def ensure_symbol_lifecycle_ready(
             processed_bars=0,
             upserted_zones=0,
             snapshots=0,
+            observations=0,
+            pattern_events=0,
+            divergence_events=0,
             zone_bar_updates=0,
             breakout_updates=0,
             warmup_start_ts=None,
@@ -81,6 +103,9 @@ def ensure_symbol_lifecycle_ready(
             processed_bars=0,
             upserted_zones=0,
             snapshots=0,
+            observations=0,
+            pattern_events=0,
+            divergence_events=0,
             zone_bar_updates=0,
             breakout_updates=0,
             warmup_start_ts=None,
@@ -110,6 +135,9 @@ def ensure_symbol_lifecycle_ready(
             processed_bars=0,
             upserted_zones=0,
             snapshots=0,
+            observations=0,
+            pattern_events=0,
+            divergence_events=0,
             zone_bar_updates=0,
             breakout_updates=0,
             warmup_start_ts=state.warmup_start_ts if state is not None else warmup_start_ts,
@@ -118,6 +146,9 @@ def ensure_symbol_lifecycle_ready(
 
     upserted_zone_ids: set[str] = set()
     snapshot_count = 0
+    observation_count = 0
+    pattern_event_count = 0
+    divergence_event_count = 0
     zone_bar_updates = 0
     breakout_updates = 0
     last_processed_ts: datetime | None = None
@@ -126,8 +157,43 @@ def ensure_symbol_lifecycle_ready(
         bar = _row_to_bar(row)
         history = bars[bars["timestamp"] <= bar.timestamp]
         dashboard_zones = list(zone_provider(history.copy(), bar))
+        for observation in list(getattr(zone_provider, "latest_observations", []) or []):
+            record_market_observation(
+                session,
+                MarketObservationInput(
+                    symbol=normalized_symbol,
+                    timeframe=str(observation.get("timeframe", normalized_timeframe)),
+                    snapshot_ts=bar.timestamp,
+                    observation_type=str(observation.get("observation_type", "observation")),
+                    label=str(observation.get("label", "")),
+                    value=float(observation.get("value")),
+                    metadata=observation.get("metadata") or {},
+                ),
+            )
+            observation_count += 1
+
+        for pattern_event in detect_pattern_events_for_latest_bar(
+            history,
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
+            config=warmup_config.pattern_events,
+        ):
+            record_pattern_event(session, pattern_event)
+            pattern_event_count += 1
+
+        for divergence_event in detect_macd_divergence_events_for_latest_bar(
+            history,
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
+            config=warmup_config.macd_divergence,
+        ):
+            record_divergence_event(session, divergence_event)
+            divergence_event_count += 1
+
         selected_zones: list[Zone] = []
         for dashboard_zone in dashboard_zones:
+            if _dashboard_zone_has_deprecated_source(dashboard_zone):
+                continue
             zone = upsert_dashboard_zone(
                 session,
                 symbol=normalized_symbol,
@@ -136,7 +202,14 @@ def ensure_symbol_lifecycle_ready(
             )
             upserted_zone_ids.add(zone.zone_id)
             selected_zones.append(zone)
-        selected_zone_ids = {zone.zone_id for zone in selected_zones}
+
+        expire_event_zones(
+            session,
+            current_ts=bar.timestamp,
+            bars_since_created_by_zone_id=_bars_since_origin_by_zone_id(selected_zones, history),
+            ttl_by_timeframe=warmup_config.lifecycle.event_zone_ttl_bars,
+            weekly_swing_expiration_days=warmup_config.lifecycle.weekly_swing_expiration_days,
+        )
 
         active_zones = session.scalars(
             select(Zone)
@@ -146,11 +219,10 @@ def ensure_symbol_lifecycle_ready(
         matching_active_zones = [
             zone
             for zone in active_zones
-            if _timeframes_match(zone.timeframe, normalized_timeframe)
-            or zone.zone_id in selected_zone_ids
+            if not _has_deprecated_source(zone)
         ]
         for zone in matching_active_zones:
-            event = process_zone_bar(session, zone, bar)
+            event = process_zone_bar(session, zone, bar, config=breakout_config)
             zone_bar_updates += 1
             if event is not None:
                 breakout_updates += 1
@@ -158,10 +230,19 @@ def ensure_symbol_lifecycle_ready(
             session,
             current_ts=bar.timestamp,
             bars_since_created_by_zone_id=_bars_since_origin_by_zone_id(matching_active_zones, history),
+            ttl_by_timeframe=warmup_config.lifecycle.event_zone_ttl_bars,
+            weekly_swing_expiration_days=warmup_config.lifecycle.weekly_swing_expiration_days,
         )
+        for zone in matching_active_zones:
+            if zone.status in ACTIVE_ZONE_STATUSES:
+                zone.zone_strength_pct = _zone_strength_pct(
+                    zone,
+                    history,
+                    lookback_weeks=warmup_config.zone_generation.strength_lookback_weeks,
+                )
 
         snapshot_zones_by_id: dict[str, Zone] = {}
-        for zone in selected_zones:
+        for zone in matching_active_zones:
             if (
                 zone.status in ACTIVE_ZONE_STATUSES
                 and (snapshot_start_ts is None or pd.Timestamp(bar.timestamp) >= snapshot_start_ts)
@@ -200,6 +281,9 @@ def ensure_symbol_lifecycle_ready(
         processed_bars=len(bars_to_process),
         upserted_zones=len(upserted_zone_ids),
         snapshots=snapshot_count,
+        observations=observation_count,
+        pattern_events=pattern_event_count,
+        divergence_events=divergence_event_count,
         zone_bar_updates=zone_bar_updates,
         breakout_updates=breakout_updates,
         warmup_start_ts=state.warmup_start_ts if state is not None else warmup_start_ts,
@@ -246,7 +330,11 @@ def _normalize_price_frame(price_df: pd.DataFrame) -> pd.DataFrame:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
 
     frame = frame.dropna(subset=["timestamp", "open", "high", "low", "close"])
-    return frame.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
+    frame = frame.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
+    frame["previous_close"] = frame["close"].shift(1)
+    frame["volume_p80_20"] = frame["volume"].shift(1).rolling(window=20, min_periods=20).quantile(0.80)
+    frame["bar_index"] = range(len(frame))
+    return frame
 
 
 def _first_existing_column(frame: pd.DataFrame, candidates: tuple[str, ...]) -> str | None:
@@ -258,6 +346,8 @@ def _first_existing_column(frame: pd.DataFrame, candidates: tuple[str, ...]) -> 
 
 def _row_to_bar(row) -> BarInput:
     atr = None if pd.isna(row.atr) else float(row.atr)
+    previous_close = None if pd.isna(row.previous_close) else float(row.previous_close)
+    volume_p80_20 = None if pd.isna(row.volume_p80_20) else float(row.volume_p80_20)
     return BarInput(
         timestamp=pd.Timestamp(row.timestamp).to_pydatetime(),
         open=float(row.open),
@@ -265,6 +355,10 @@ def _row_to_bar(row) -> BarInput:
         low=float(row.low),
         close=float(row.close),
         atr=atr,
+        previous_close=previous_close,
+        volume=float(row.volume),
+        volume_p80_20=volume_p80_20,
+        bar_index=int(row.bar_index),
     )
 
 
@@ -292,16 +386,34 @@ def _coerce_timestamp(value) -> pd.Timestamp | None:
     return timestamp
 
 
-def _timeframes_match(left: str, right: str) -> bool:
-    return _normalize_timeframe_alias(left) == _normalize_timeframe_alias(right)
+def _has_deprecated_source(zone: Zone) -> bool:
+    if zone.zone_kind == ZoneKind.COMPOSITE:
+        return True
+    sources = {str(source).strip().lower() for source in zone.source or []}
+    return _has_deprecated_source_values(sources)
 
 
-def _normalize_timeframe_alias(value: str) -> str:
-    normalized = str(value).strip().lower()
-    return {"d": "1d", "day": "1d", "daily": "1d", "w": "1w", "week": "1w", "weekly": "1w"}.get(
-        normalized,
-        normalized,
+def _dashboard_zone_has_deprecated_source(zone: dict[str, Any]) -> bool:
+    if zone.get("zone_kind") == ZoneKind.COMPOSITE:
+        return True
+    return _has_deprecated_source_values(_coerce_string_set(zone.get("source_types")))
+
+
+def _has_deprecated_source_values(sources: set[str]) -> bool:
+    if "swing_w" not in sources:
+        return True
+    return bool(sources & DEPRECATED_ZONE_SOURCES) or any(
+        source.startswith("avwap_") or source.startswith("vp_")
+        for source in sources
     )
+
+
+def _coerce_string_set(value) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        return {item.strip().lower() for item in value.split(",") if item.strip()}
+    return {str(item).strip().lower() for item in value if str(item).strip()}
 
 
 def _bars_since_origin_by_zone_id(zones: list[Zone], history: pd.DataFrame) -> dict[str, int]:
@@ -316,6 +428,16 @@ def _bars_since_origin_by_zone_id(zones: list[Zone], history: pd.DataFrame) -> d
         bars_since = sum(1 for timestamp in timestamps if timestamp >= origin_ts)
         result[zone.zone_id] = max(bars_since, 0)
     return result
+
+
+def _zone_strength_pct(zone: Zone, history: pd.DataFrame, *, lookback_weeks: int = 52) -> float:
+    return zone_strength_from_interval(
+        price_history=history,
+        price_low=float(zone.price_low),
+        price_high=float(zone.price_high),
+        date_column="timestamp",
+        lookback_weeks=lookback_weeks,
+    )["zone_strength_pct"]
 
 
 def _get_state(session: Session, symbol: str, timeframe: str) -> SymbolLifecycleState | None:

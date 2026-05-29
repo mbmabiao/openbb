@@ -23,7 +23,6 @@ class ZoneIdentityInput:
     origin_event_id: str | None = None
     vp_window_type: str | None = None
     vp_structure_key: str | None = None
-    merged_from_zone_ids: tuple[str, ...] | None = None
 
 
 def generate_zone_id(identity: ZoneIdentityInput) -> str:
@@ -54,30 +53,17 @@ def generate_zone_id(identity: ZoneIdentityInput) -> str:
             "vp_window_type": identity.vp_window_type or "",
             "vp_structure_key": identity.vp_structure_key or "",
         }
-    elif zone_kind == ZoneKind.COMPOSITE:
-        payload = {
-            "symbol": _normalize_symbol(identity.symbol),
-            "timeframe": _normalize_timeframe(identity.timeframe),
-            "zone_kind": ZoneKind.COMPOSITE,
-            "merged_from_zone_ids": _normalize_string_list(identity.merged_from_zone_ids or ()),
-        }
     else:
         raise ValueError(f"Unsupported zone_kind: {identity.zone_kind}")
 
     return _hash_payload(payload)
 
 
-def infer_zone_kind(source: Iterable[str], merged_from_zone_ids: Iterable[str] | None = None) -> str:
-    merged_from = tuple(merged_from_zone_ids or ())
-    if len(merged_from) > 1:
-        return ZoneKind.COMPOSITE
-
+def infer_zone_kind(source: Iterable[str]) -> str:
     normalized_sources = _normalize_string_list(source)
-    if len(normalized_sources) > 1:
-        return ZoneKind.COMPOSITE
-    if normalized_sources and normalized_sources[0].startswith("avwap"):
+    if any(source.startswith("avwap") for source in normalized_sources):
         return ZoneKind.AVWAP
-    if normalized_sources and normalized_sources[0].startswith("vp"):
+    if any(source.startswith("vp") for source in normalized_sources):
         return ZoneKind.VP
     return ZoneKind.EVENT
 

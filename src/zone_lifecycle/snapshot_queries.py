@@ -7,7 +7,8 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .constants import ACTIVE_ZONE_STATUSES, ZONE_STATUS_RANK, ZoneRole
+from config.warmup_config import WarmupThresholdConfig, load_warmup_config
+from .constants import ACTIVE_ZONE_STATUSES, DEPRECATED_ZONE_SOURCES, ZONE_STATUS_RANK, ZoneKind, ZoneRole
 from .models import Zone, ZoneDailySnapshot
 
 
@@ -23,10 +24,9 @@ def load_replay_zone_snapshots(
     *,
     symbol: str,
     replay_date,
-    max_distance_atr: float = 3.0,
-    max_support_zones: int | None = None,
-    max_resistance_zones: int | None = None,
+    warmup_config: WarmupThresholdConfig | None = None,
 ) -> ReplayZoneSnapshotResult:
+    warmup_config = warmup_config or load_warmup_config()
     replay_ts = pd.Timestamp(replay_date).normalize().to_pydatetime()
     rows = session.execute(
         select(ZoneDailySnapshot, Zone)
@@ -39,17 +39,18 @@ def load_replay_zone_snapshots(
     zones = [
         _snapshot_to_dashboard_zone(snapshot=snapshot, zone=zone)
         for snapshot, zone in rows
-        if _within_distance(snapshot, max_distance_atr)
+        if not _has_deprecated_source(zone)
+        and not _is_expired_at_snapshot(
+            snapshot,
+            zone,
+            expiration_days=warmup_config.lifecycle.weekly_swing_expiration_days,
+        )
     ]
     zones.sort(key=_sort_key)
 
+    zones = [_with_price_relative_role(zone) for zone in zones]
     resistance = [zone for zone in zones if zone.get("side") == ZoneRole.RESISTANCE]
     support = [zone for zone in zones if zone.get("side") == ZoneRole.SUPPORT]
-    if max_resistance_zones is not None:
-        resistance = resistance[: int(max_resistance_zones)]
-    if max_support_zones is not None:
-        support = support[: int(max_support_zones)]
-
     return ReplayZoneSnapshotResult(
         support_zones=_assign_display_labels(support, "S"),
         resistance_zones=_assign_display_labels(resistance, "R"),
@@ -78,29 +79,46 @@ def _snapshot_to_dashboard_zone(*, snapshot: ZoneDailySnapshot, zone: Zone) -> d
         "distance_pct": float(snapshot.distance_to_price) / max(float(snapshot.current_price), 1e-9),
         "zone_status": snapshot.zone_status,
         "current_role": snapshot.current_role,
+        "zone_strength_pct": float(snapshot.zone_strength_pct or 0.0),
         "source_types": source_types,
         "source_types_label": source_types_label,
         "timeframe_sources": zone.timeframe,
         "timeframes": set(str(zone.timeframe).split(",")),
-        "confluence_count": len(zone.merged_from_zone_ids or []) or len(source_types) or 1,
-        "vp_volume": 0.0,
-        "anchor_count": 0,
-        "avwap_strength": 0.0,
         "center_volume": 0.0,
         "touch_count": zone.touch_count,
         "close_inside_count": zone.close_inside_count,
         "break_count": zone.break_count,
-        "false_break_count": zone.false_break_count,
         "confirmed_breakout_count": zone.confirmed_breakout_count,
-        "failed_breakout_count": zone.failed_breakout_count,
         "retest_num": zone.retest_num,
     }
 
 
-def _within_distance(snapshot: ZoneDailySnapshot, max_distance_atr: float) -> bool:
-    if snapshot.distance_atr is None:
+def _with_price_relative_role(zone: dict) -> dict:
+    zone_copy = zone.copy()
+    side = ZoneRole.RESISTANCE if float(zone_copy["center"]) >= float(zone_copy["current_price"]) else ZoneRole.SUPPORT
+    zone_copy["side"] = side
+    zone_copy["current_role"] = side
+    return zone_copy
+
+
+def _has_deprecated_source(zone: Zone) -> bool:
+    if zone.zone_kind == ZoneKind.COMPOSITE:
         return True
-    return float(snapshot.distance_atr) <= float(max_distance_atr)
+    sources = {str(source).strip().lower() for source in zone.source or []}
+    if "swing_w" not in sources:
+        return True
+    return bool(sources & DEPRECATED_ZONE_SOURCES) or any(
+        source.startswith("avwap_") or source.startswith("vp_")
+        for source in sources
+    )
+
+
+def _is_expired_at_snapshot(snapshot: ZoneDailySnapshot, zone: Zone, *, expiration_days: int) -> bool:
+    sources = {str(source).strip().lower() for source in zone.source or []}
+    if "swing_w" not in sources or zone.origin_bar is None:
+        return False
+    age = pd.Timestamp(snapshot.snapshot_ts) - pd.Timestamp(zone.origin_bar)
+    return age >= pd.Timedelta(days=max(int(expiration_days), 0))
 
 
 def _sort_key(zone: dict) -> tuple[float, int, str]:

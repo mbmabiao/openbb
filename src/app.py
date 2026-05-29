@@ -15,12 +15,24 @@ from data.market_data import (
     fetch_income_statement,
     fetch_ratios,
 )
+from market_dashboard import render_market_dashboard
 from ui.panels import show_dataframe_result, show_news
 from ui.sidebar import render_sidebar
 
 
 st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 st.title(APP_TITLE)
+
+top_page = st.radio(
+    "Top navigation",
+    ("个股", "市场"),
+    horizontal=True,
+    label_visibility="collapsed",
+)
+
+if top_page == "市场":
+    render_market_dashboard()
+    st.stop()
 
 controls = render_sidebar()
 if not controls.symbol:

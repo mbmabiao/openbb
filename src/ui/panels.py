@@ -69,14 +69,14 @@ def show_definitions(controls: DashboardControls) -> None:
         f"""
 **This version uses simplified volume-first zone ranking and replay mode.**
 
-**1) AVWAP Zones and VP Windows**
+**1) Zone Candidates and Observation Lines**
+- Zone candidates come only from recent weekly swing highs/lows; resistance uses the original weekly swing high price, support uses the original weekly swing low price
 - VP window: recent **{controls.long_vp_lookback_days} trading days**; uses **5m OHLCV** when complete intraday data is available for every trading day in the window, otherwise **1d OHLCV**
 - Composite VP method: each source bar distributes volume across all covered price bins
-- If complete 5m data is not available for the window, VP is rebuilt from 1d OHLCV
-- AVWAP still records daily/weekly timeframe source(s); VP records the fixed long window source
+- AVWAP and VP/POC are observation lines only; they are drawn on the chart and recorded to `market_observations`, but they do not create zones
 
 **2) Multi-timeframe confluence**
-- Daily and weekly zones are merged when close or overlapping
+- Weekly swing zones are merged when close or overlapping
 
 **3) Zone ranking**
 - For each candidate zone, the system sums historical volume from bars that overlap the fixed band around zone center: **center +/- {controls.zone_expand_pct:.2%}**

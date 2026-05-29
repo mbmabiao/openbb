@@ -7,7 +7,7 @@ import json
 
 import pandas as pd
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from .constants import BREAKOUT_TERMINAL_STATUSES, BreakoutEventStatus, ZoneRole, ZoneStatus
 from .lifecycle import BarInput, update_zone_interaction_counts
@@ -16,14 +16,14 @@ from .models import BreakoutEvent, Zone
 
 @dataclass(frozen=True, slots=True)
 class BreakoutStateConfig:
-    breakout_confirm_buffer_atr: float = 0.10
-    failure_buffer_atr: float = 0.10
+    breakout_confirm_buffer_atr: float = 0.0
+    failure_buffer_atr: float = 0.0
     strong_follow_through_atr: float = 1.00
     weak_follow_through_atr: float = 0.30
     follow_through_window_bars: int = 5
     fast_failure_window_bars: int = 3
-    failure_window_bars: int = 10
-    retest_window_bars: int = 10
+    failure_window_bars: int = 5
+    retest_window_bars: int = 3
 
 
 def process_zone_bar(
@@ -35,7 +35,6 @@ def process_zone_bar(
     config = config or BreakoutStateConfig()
     atr = _valid_atr(bar.atr)
     breakout_buffer = config.breakout_confirm_buffer_atr * atr
-    failure_buffer = config.failure_buffer_atr * atr
     timestamp = _coerce_timestamp(bar.timestamp)
 
     update_zone_interaction_counts(zone, bar, breakout_buffer=breakout_buffer)
@@ -48,21 +47,18 @@ def process_zone_bar(
             bar=bar,
             timestamp=timestamp,
             config=config,
-            failure_buffer=failure_buffer,
         )
 
     if zone.status in {ZoneStatus.EXPIRED, ZoneStatus.INVALIDATED}:
         return None
 
-    direction = _breakout_direction(zone)
     status = _initial_breakout_status(
         zone=zone,
         bar=bar,
-        breakout_buffer=breakout_buffer,
-        direction=direction,
     )
     if status is None:
         return None
+    direction, status = status
 
     event = BreakoutEvent(
         breakout_event_id=_breakout_event_id(zone.zone_id, status, timestamp),
@@ -79,7 +75,7 @@ def process_zone_bar(
         follow_through_atr=0.0,
         created_ts=timestamp,
         updated_ts=timestamp,
-        metadata_json={},
+        metadata_json=_event_metadata(bar),
     )
     session.add(event)
     _sync_zone_for_event_status(zone, event, timestamp)
@@ -93,28 +89,8 @@ def _advance_breakout_event(
     bar: BarInput,
     timestamp: datetime,
     config: BreakoutStateConfig,
-    failure_buffer: float,
 ) -> BreakoutEvent:
     previous_status = event.status
-    if event.status == BreakoutEventStatus.ATTEMPT:
-        next_status = _initial_breakout_status(
-            zone=zone,
-            bar=bar,
-            breakout_buffer=config.breakout_confirm_buffer_atr * event.atr_at_breakout,
-            direction=event.direction,
-        )
-        if next_status in {BreakoutEventStatus.CONFIRMED, BreakoutEventStatus.FALSE_BREAKOUT}:
-            event.status = next_status
-            event.breakout_bar = timestamp
-            event.breakout_close = float(bar.close)
-            event.atr_at_breakout = _valid_atr(bar.atr)
-            event.max_high_after_breakout = float(bar.high)
-            event.min_low_after_breakout = float(bar.low)
-            event.follow_through_atr = 0.0
-            event.updated_ts = timestamp
-            _sync_zone_for_event_status(zone, event, timestamp, previous_status=previous_status)
-        return event
-
     event.max_high_after_breakout = max(
         float(event.max_high_after_breakout or bar.high),
         float(bar.high),
@@ -125,28 +101,29 @@ def _advance_breakout_event(
     )
     event.follow_through_atr = _follow_through_atr(event)
     bars_since_confirmed = _bars_since_confirmed(event, bar)
+    open_price = float(bar.open)
     close = float(bar.close)
     high = float(bar.high)
     low = float(bar.low)
 
-    if _is_retest_failed(event, zone, close, failure_buffer):
-        event.status = BreakoutEventStatus.RETEST_FAILED
-    elif bars_since_confirmed <= config.failure_window_bars and _is_failed_breakout(event, zone, close, failure_buffer):
-        event.status = BreakoutEventStatus.FAILED_BREAKOUT
-    elif _is_fast_false_breakout(event, zone, close, bars_since_confirmed, config):
-        event.status = BreakoutEventStatus.FALSE_BREAKOUT
-    elif bars_since_confirmed <= config.retest_window_bars and _is_retest_success(event, zone, high, low, close, failure_buffer):
-        event.status = BreakoutEventStatus.RETEST_SUCCESS
-    elif _is_reclaimed(zone, close):
-        event.status = BreakoutEventStatus.RECLAIMED
-    elif bars_since_confirmed <= config.retest_window_bars and _is_retesting(event, zone, high, low, close):
-        event.status = BreakoutEventStatus.RETESTING
-        zone.retest_num += 1
-    elif bars_since_confirmed <= config.follow_through_window_bars and event.follow_through_atr is not None:
-        if event.follow_through_atr >= config.strong_follow_through_atr:
-            event.status = BreakoutEventStatus.TRUE_BREAKOUT_STRONG
-        elif event.follow_through_atr >= config.weak_follow_through_atr:
-            event.status = BreakoutEventStatus.TRUE_BREAKOUT_WEAK
+    if 1 <= bars_since_confirmed <= _effective_retest_window(config) and _is_retest_success(event, zone, high, low, open_price, close):
+        event.updated_ts = timestamp
+        session = object_session(event)
+        existing_retest = _find_retest_event_for_parent(session=session, parent_event_id=event.breakout_event_id)
+        if existing_retest is not None:
+            _sync_zone_for_event_status(zone, existing_retest, timestamp, previous_status=previous_status)
+            return existing_retest
+        retest_event = _create_retest_event(
+            parent=event,
+            zone=zone,
+            bar=bar,
+            timestamp=timestamp,
+            atr=_valid_atr(bar.atr),
+        )
+        if session is not None:
+            session.add(retest_event)
+        _sync_zone_for_event_status(zone, retest_event, timestamp, previous_status=previous_status)
+        return retest_event
 
     event.updated_ts = timestamp
     _sync_zone_for_event_status(zone, event, timestamp, previous_status=previous_status)
@@ -157,26 +134,15 @@ def _initial_breakout_status(
     *,
     zone: Zone,
     bar: BarInput,
-    breakout_buffer: float,
-    direction: str,
-) -> str | None:
-    high = float(bar.high)
-    low = float(bar.low)
+) -> tuple[str, str] | None:
     close = float(bar.close)
-    if direction == "up":
-        if high > zone.price_high + breakout_buffer and close <= zone.price_high:
-            return BreakoutEventStatus.FALSE_BREAKOUT
-        if close > zone.price_high + breakout_buffer:
-            return BreakoutEventStatus.CONFIRMED
-        if high > zone.price_high and close <= zone.price_high + breakout_buffer:
-            return BreakoutEventStatus.ATTEMPT
-    else:
-        if low < zone.price_low - breakout_buffer and close >= zone.price_low:
-            return BreakoutEventStatus.FALSE_BREAKOUT
-        if close < zone.price_low - breakout_buffer:
-            return BreakoutEventStatus.CONFIRMED
-        if low < zone.price_low and close >= zone.price_low - breakout_buffer:
-            return BreakoutEventStatus.ATTEMPT
+    previous_close = _previous_close(bar)
+    center = float(zone.price_center)
+    if previous_close is None:
+        return None
+    if previous_close < center and close > center:
+        status = BreakoutEventStatus.CONFIRMED if _has_volume_confirmation(bar) else BreakoutEventStatus.TRUE_BREAKOUT_WEAK
+        return "up", status
     return None
 
 
@@ -186,21 +152,15 @@ def _sync_zone_for_event_status(
     timestamp: datetime,
     previous_status: str | None = None,
 ) -> None:
-    if event.status == BreakoutEventStatus.CONFIRMED:
+    if event.status in {BreakoutEventStatus.CONFIRMED, BreakoutEventStatus.TRUE_BREAKOUT_WEAK}:
         zone.status = ZoneStatus.FLIPPED
-        zone.current_role = ZoneRole.SUPPORT if event.direction == "up" else ZoneRole.RESISTANCE
+        zone.current_role = ZoneRole.SUPPORT
     elif event.status == BreakoutEventStatus.RETEST_SUCCESS:
         zone.status = ZoneStatus.RETESTED
-        zone.current_role = ZoneRole.SUPPORT if event.direction == "up" else ZoneRole.RESISTANCE
-    elif event.status in {BreakoutEventStatus.FAILED_BREAKOUT, BreakoutEventStatus.RETEST_FAILED}:
-        zone.status = ZoneStatus.INVALIDATED
-        zone.invalidated_ts = timestamp
-        zone.failed_breakout_count += 1
-    elif event.status == BreakoutEventStatus.FALSE_BREAKOUT and previous_status is not None:
-        zone.false_break_count += 1
+        zone.current_role = ZoneRole.SUPPORT
     elif event.status == BreakoutEventStatus.RETESTING:
         zone.status = ZoneStatus.FLIPPED
-        zone.current_role = ZoneRole.SUPPORT if event.direction == "up" else ZoneRole.RESISTANCE
+        zone.current_role = ZoneRole.SUPPORT
     zone.updated_ts = timestamp
 
 
@@ -215,39 +175,55 @@ def _find_active_breakout_event(session: Session, zone_id: str) -> BreakoutEvent
     ).first()
 
 
-def _breakout_direction(zone: Zone) -> str:
-    if zone.current_role == ZoneRole.SUPPORT:
-        return "down"
-    return "up"
+def _effective_retest_window(config: BreakoutStateConfig) -> int:
+    return min(max(int(config.retest_window_bars), 0), 3)
 
 
-def _is_failed_breakout(event: BreakoutEvent, zone: Zone, close: float, failure_buffer: float) -> bool:
-    if event.direction == "up":
-        return close < zone.price_low - failure_buffer
-    return close > zone.price_high + failure_buffer
+def _find_retest_event_for_parent(session: Session | None, parent_event_id: str) -> BreakoutEvent | None:
+    if session is None:
+        return None
+    return session.scalars(
+        select(BreakoutEvent)
+        .where(BreakoutEvent.status == BreakoutEventStatus.RETEST_SUCCESS)
+        .where(BreakoutEvent.metadata_json["parent_breakout_event_id"].as_string() == parent_event_id)
+    ).first()
 
 
-def _is_retest_failed(event: BreakoutEvent, zone: Zone, close: float, failure_buffer: float) -> bool:
-    if event.status != BreakoutEventStatus.RETESTING:
-        return False
-    return _is_failed_breakout(event, zone, close, failure_buffer)
-
-
-def _is_fast_false_breakout(
-    event: BreakoutEvent,
+def _create_retest_event(
+    *,
+    parent: BreakoutEvent,
     zone: Zone,
-    close: float,
-    bars_since_confirmed: int,
-    config: BreakoutStateConfig,
-) -> bool:
-    if bars_since_confirmed > config.fast_failure_window_bars:
-        return False
-    follow = float(event.follow_through_atr or 0.0)
-    if follow >= config.weak_follow_through_atr:
-        return False
-    if event.direction == "up":
-        return close <= zone.price_high
-    return close >= zone.price_low
+    bar: BarInput,
+    timestamp: datetime,
+    atr: float,
+) -> BreakoutEvent:
+    metadata = _event_metadata(bar)
+    metadata.update(
+        {
+            "parent_breakout_event_id": parent.breakout_event_id,
+            "parent_breakout_bar": pd.Timestamp(parent.breakout_bar).isoformat(),
+            "parent_breakout_close": float(parent.breakout_close),
+            "parent_breakout_status": parent.status,
+            "zone_center": float(zone.price_center),
+        }
+    )
+    return BreakoutEvent(
+        breakout_event_id=_breakout_event_id(zone.zone_id, BreakoutEventStatus.RETEST_SUCCESS, timestamp),
+        zone_id=zone.zone_id,
+        symbol=zone.symbol,
+        timeframe=zone.timeframe,
+        direction=parent.direction,
+        status=BreakoutEventStatus.RETEST_SUCCESS,
+        breakout_bar=timestamp,
+        breakout_close=float(bar.close),
+        atr_at_breakout=atr,
+        max_high_after_breakout=float(bar.high),
+        min_low_after_breakout=float(bar.low),
+        follow_through_atr=parent.follow_through_atr,
+        created_ts=timestamp,
+        updated_ts=timestamp,
+        metadata_json=metadata,
+    )
 
 
 def _is_retest_success(
@@ -255,29 +231,53 @@ def _is_retest_success(
     zone: Zone,
     high: float,
     low: float,
+    open_price: float,
     close: float,
-    failure_buffer: float,
 ) -> bool:
-    if event.direction == "up":
-        return low <= zone.price_high and close >= zone.price_high and close >= zone.price_low - failure_buffer
-    return high >= zone.price_low and close <= zone.price_low and close <= zone.price_high + failure_buffer
-
-
-def _is_retesting(event: BreakoutEvent, zone: Zone, high: float, low: float, close: float) -> bool:
-    if event.direction == "up":
-        return low <= zone.price_high and close >= zone.price_low
-    return high >= zone.price_low and close <= zone.price_high
-
-
-def _is_reclaimed(zone: Zone, close: float) -> bool:
-    return zone.price_low <= close <= zone.price_high
+    if event.status not in {BreakoutEventStatus.CONFIRMED, BreakoutEventStatus.TRUE_BREAKOUT_WEAK}:
+        return False
+    if event.direction != "up":
+        return False
+    center = float(zone.price_center)
+    return low <= center and open_price > center and close > center and float(event.breakout_close) > center
 
 
 def _follow_through_atr(event: BreakoutEvent) -> float:
     atr = max(float(event.atr_at_breakout), 1e-9)
-    if event.direction == "up":
-        return (float(event.max_high_after_breakout or event.breakout_close) - event.breakout_close) / atr
-    return (event.breakout_close - float(event.min_low_after_breakout or event.breakout_close)) / atr
+    return (float(event.max_high_after_breakout or event.breakout_close) - event.breakout_close) / atr
+
+
+def _previous_close(bar: BarInput) -> float | None:
+    value = getattr(bar, "previous_close", None)
+    if value is None or pd.isna(value):
+        return None
+    return float(value)
+
+
+def _has_volume_confirmation(bar: BarInput) -> bool:
+    volume = getattr(bar, "volume", None)
+    threshold = getattr(bar, "volume_p80_20", None)
+    if volume is None or threshold is None or pd.isna(volume) or pd.isna(threshold):
+        return False
+    return float(volume) >= float(threshold)
+
+
+def _event_metadata(bar: BarInput) -> dict:
+    metadata = {
+        "previous_close": _previous_close(bar),
+        "volume": _optional_float(getattr(bar, "volume", None)),
+        "volume_p80_20": _optional_float(getattr(bar, "volume_p80_20", None)),
+        "volume_confirmed": _has_volume_confirmation(bar),
+    }
+    if getattr(bar, "bar_index", None) is not None:
+        metadata["bar_index"] = int(bar.bar_index)
+    return metadata
+
+
+def _optional_float(value: float | None) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    return float(value)
 
 
 def _bars_since_confirmed(event: BreakoutEvent, bar: BarInput) -> int:

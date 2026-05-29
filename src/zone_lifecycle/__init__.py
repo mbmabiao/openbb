@@ -1,56 +1,6 @@
-from .adapters import upsert_dashboard_zone
-from .dashboard_persistence import (
-    DashboardZonePersistenceResult,
-    persist_dashboard_zones,
-    persist_dashboard_zones_safely,
-    sqlite_database_url,
-)
-from .identity import ZoneIdentityInput, generate_zone_id
-from .lifecycle import (
-    BarInput,
-    apply_composite_lifecycle,
-    expire_event_zones,
-    update_zone_interaction_counts,
-)
-from .breakout_state_machine import BreakoutStateConfig, process_zone_bar
-from .models import Base, BreakoutEvent, SymbolLifecycleState, Zone, ZoneDailySnapshot
-from .repository import create_session_factory, init_db
-from .service import (
-    ZoneSnapshotInput,
-    distance_to_zone,
-    record_zone_snapshot,
-    upsert_zone,
-)
-from .snapshot_queries import ReplayZoneSnapshotResult, load_replay_zone_snapshots
-from .warmup import LifecycleWarmupResult, ensure_symbol_lifecycle_ready
+"""Zone lifecycle package.
 
-__all__ = [
-    "Base",
-    "BreakoutEvent",
-    "BarInput",
-    "BreakoutStateConfig",
-    "Zone",
-    "ZoneDailySnapshot",
-    "SymbolLifecycleState",
-    "ZoneIdentityInput",
-    "ZoneSnapshotInput",
-    "LifecycleWarmupResult",
-    "DashboardZonePersistenceResult",
-    "ReplayZoneSnapshotResult",
-    "create_session_factory",
-    "apply_composite_lifecycle",
-    "distance_to_zone",
-    "expire_event_zones",
-    "generate_zone_id",
-    "init_db",
-    "load_replay_zone_snapshots",
-    "process_zone_bar",
-    "record_zone_snapshot",
-    "update_zone_interaction_counts",
-    "ensure_symbol_lifecycle_ready",
-    "persist_dashboard_zones",
-    "persist_dashboard_zones_safely",
-    "sqlite_database_url",
-    "upsert_zone",
-    "upsert_dashboard_zone",
-]
+Import concrete APIs from their submodules to keep package initialization light.
+"""
+
+__all__: list[str] = []

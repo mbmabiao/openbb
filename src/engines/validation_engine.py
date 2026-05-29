@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from features.boundaries import format_zone_source_types
+from features.zone_strength import zone_strength_from_center
 
 
 def rank_zones_for_side(
@@ -12,6 +13,7 @@ def rank_zones_for_side(
     max_zones: int,
     price_history: pd.DataFrame,
     center_volume_pct: float,
+    strength_lookback_weeks: int = 52,
 ) -> list[dict]:
     ranked: list[dict] = []
 
@@ -27,11 +29,15 @@ def rank_zones_for_side(
         enriched_zone = zone.copy()
         enriched_zone["timeframe_sources"] = ",".join(sorted(timeframes))
         enriched_zone["source_types_label"] = format_zone_source_types(zone.get("source_types", set()))
-        enriched_zone["center_volume"] = _center_band_volume(
-            df=price_history,
-            center=float(zone["center"]),
-            band_pct=center_volume_pct,
-        )
+        if "center_volume" not in enriched_zone or "zone_strength_pct" not in enriched_zone:
+            strength = zone_strength_from_center(
+                price_history=price_history,
+                center=float(zone["center"]),
+                band_pct=center_volume_pct,
+                lookback_weeks=strength_lookback_weeks,
+            )
+            enriched_zone["center_volume"] = strength["zone_volume"]
+            enriched_zone["zone_strength_pct"] = strength["zone_strength_pct"]
         ranked.append(enriched_zone)
 
     ranked = sorted(
@@ -45,15 +51,23 @@ def rank_zones_for_side(
     return ranked[:max_zones]
 
 
-def _center_band_volume(df: pd.DataFrame, center: float, band_pct: float) -> float:
-    if df.empty or "volume" not in df.columns or "high" not in df.columns or "low" not in df.columns or center <= 0:
-        return 0.0
-
-    pct = max(float(band_pct), 0.0)
-    lower = center * (1.0 - pct)
-    upper = center * (1.0 + pct)
-    high = pd.to_numeric(df.get("high"), errors="coerce")
-    low = pd.to_numeric(df.get("low"), errors="coerce")
-    volume = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
-    touched = (low <= upper) & (high >= lower)
-    return float(volume.where(touched, 0.0).sum())
+def enrich_zones_with_strength(
+    zones: list[dict],
+    *,
+    price_history: pd.DataFrame,
+    center_volume_pct: float,
+    strength_lookback_weeks: int = 52,
+) -> list[dict]:
+    output: list[dict] = []
+    for zone in zones:
+        zone_copy = zone.copy()
+        strength = zone_strength_from_center(
+            price_history=price_history,
+            center=float(zone["center"]),
+            band_pct=center_volume_pct,
+            lookback_weeks=strength_lookback_weeks,
+        )
+        zone_copy["center_volume"] = strength["zone_volume"]
+        zone_copy["zone_strength_pct"] = strength["zone_strength_pct"]
+        output.append(zone_copy)
+    return output

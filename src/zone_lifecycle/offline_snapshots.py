@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 
 from data.market_data import clean_price_history_frame, fetch_price_history, normalise_ohlcv_columns, to_dataframe
 from engines.zone_generation import ZoneGenerationConfig, make_preloaded_zone_provider
-from .models import BreakoutEvent, SymbolLifecycleState, Zone, ZoneDailySnapshot
+from config.warmup_config import WarmupThresholdConfig
+from .models import BreakoutEvent, DivergenceEvent, MarketObservation, PatternEvent, SymbolLifecycleState, Zone, ZoneDailySnapshot
 from .repository import create_session_factory
 from .warmup import LifecycleWarmupResult, ensure_symbol_lifecycle_ready
 
@@ -32,6 +33,7 @@ def build_zone_snapshots_offline(
     lookback_years: int = 2,
     force: bool = True,
     reset: bool = False,
+    warmup_config: WarmupThresholdConfig | None = None,
 ) -> OfflineSnapshotBuildResult:
     normalized_symbol = str(symbol).strip().upper()
     start_ts = pd.Timestamp(start_date).normalize()
@@ -82,6 +84,7 @@ def build_zone_snapshots_offline(
             snapshot_start_date=start_ts,
             snapshot_end_date=end_ts,
             force=force,
+            warmup_config=warmup_config,
         )
         session.commit()
 
@@ -96,6 +99,9 @@ def build_zone_snapshots_offline(
 def reset_symbol_lifecycle_data(session: Session, symbol: str) -> None:
     normalized_symbol = str(symbol).strip().upper()
     session.execute(delete(ZoneDailySnapshot).where(ZoneDailySnapshot.symbol == normalized_symbol))
+    session.execute(delete(MarketObservation).where(MarketObservation.symbol == normalized_symbol))
+    session.execute(delete(PatternEvent).where(PatternEvent.symbol == normalized_symbol))
+    session.execute(delete(DivergenceEvent).where(DivergenceEvent.symbol == normalized_symbol))
     session.execute(delete(BreakoutEvent).where(BreakoutEvent.symbol == normalized_symbol))
     session.execute(delete(Zone).where(Zone.symbol == normalized_symbol))
     session.execute(delete(SymbolLifecycleState).where(SymbolLifecycleState.symbol == normalized_symbol))

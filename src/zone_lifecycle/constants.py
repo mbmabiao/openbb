@@ -22,12 +22,9 @@ class BreakoutEventStatus:
     CONFIRMED = "confirmed"
     TRUE_BREAKOUT_STRONG = "true_breakout_strong"
     TRUE_BREAKOUT_WEAK = "true_breakout_weak"
-    FAILED_BREAKOUT = "failed_breakout"
-    FALSE_BREAKOUT = "false_breakout"
     RECLAIMED = "reclaimed"
     RETESTING = "retesting"
     RETEST_SUCCESS = "retest_success"
-    RETEST_FAILED = "retest_failed"
 
 
 class ZoneRole:
@@ -41,6 +38,17 @@ ACTIVE_ZONE_STATUSES = {
     ZoneStatus.BROKEN,
     ZoneStatus.FLIPPED,
     ZoneStatus.RETESTED,
+}
+
+
+DEPRECATED_ZONE_SOURCES = {
+    "avwap_d_event",
+    "avwap_d_swing",
+    "avwap_short_rolling",
+    "avwap_w_event",
+    "avwap_w_swing",
+    "vp_long",
+    "vp_short",
 }
 
 
@@ -65,18 +73,11 @@ EVENT_ZONE_TTL_BARS = {
 
 BREAKOUT_TERMINAL_STATUSES = {
     BreakoutEventStatus.TRUE_BREAKOUT_STRONG,
-    BreakoutEventStatus.TRUE_BREAKOUT_WEAK,
-    BreakoutEventStatus.FAILED_BREAKOUT,
-    BreakoutEventStatus.FALSE_BREAKOUT,
     BreakoutEventStatus.RETEST_SUCCESS,
-    BreakoutEventStatus.RETEST_FAILED,
 }
 
 
 STATUS_PRIORITY = [
-    BreakoutEventStatus.FAILED_BREAKOUT,
-    BreakoutEventStatus.RETEST_FAILED,
-    BreakoutEventStatus.FALSE_BREAKOUT,
     BreakoutEventStatus.RETEST_SUCCESS,
     BreakoutEventStatus.TRUE_BREAKOUT_STRONG,
     BreakoutEventStatus.TRUE_BREAKOUT_WEAK,

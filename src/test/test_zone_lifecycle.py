@@ -10,12 +10,15 @@ from sqlalchemy import func, select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from zone_lifecycle.breakout_state_machine import process_zone_bar
+from zone_lifecycle.breakout_state_machine import BreakoutStateConfig, process_zone_bar
+from zone_lifecycle.breakout_event_queries import load_breakout_events
 from zone_lifecycle.constants import BreakoutEventStatus, ZoneKind, ZoneRole, ZoneStatus
-from zone_lifecycle.dashboard_persistence import persist_dashboard_zones
-from zone_lifecycle.lifecycle import BarInput, apply_composite_lifecycle, expire_event_zones, update_zone_interaction_counts
-from zone_lifecycle.models import BreakoutEvent, SymbolLifecycleState, Zone, ZoneDailySnapshot
+from zone_lifecycle.divergence_event_queries import _prefer_confirmed_over_risk
+from zone_lifecycle.divergence_events import _build_divergence_event
+from zone_lifecycle.lifecycle import BarInput, expire_event_zones, update_zone_interaction_counts
+from zone_lifecycle.models import BreakoutEvent, DivergenceEvent, MarketObservation, PatternEvent, SymbolLifecycleState, Zone, ZoneDailySnapshot
 from zone_lifecycle.offline_snapshots import reset_symbol_lifecycle_data
+from zone_lifecycle.pattern_events import detect_pattern_events_for_latest_bar
 from zone_lifecycle.repository import create_session_factory
 from zone_lifecycle.service import ZoneSnapshotInput, record_zone_snapshot, upsert_zone
 from zone_lifecycle.snapshot_queries import load_replay_zone_snapshots
@@ -28,8 +31,7 @@ from engines.zone_generation import (
     make_replay_zone_provider,
 )
 from engines.validation_engine import rank_zones_for_side
-from features.boundaries import create_candidate_zones_from_avwap, merge_close_zones
-from features.volume_profile import build_avwap_features, find_anchor_points
+from features.volume_profile import find_recent_swing_points
 
 
 class ZoneLifecyclePhaseOneTests(unittest.TestCase):
@@ -177,47 +179,6 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             zone_count = session.scalar(select(func.count()).select_from(Zone))
             self.assertEqual(zone_count, 1)
 
-    def test_avwap_zone_keeps_anchor_identity_while_price_window_drifts(self) -> None:
-        anchor_meta = {
-            "avwap_short_rolling_21_high": {
-                "anchor_name": "rolling_21_high",
-                "anchor_family": "rolling",
-                "start_date": dt.datetime(2026, 1, 5),
-                "timeframe": "short",
-            }
-        }
-        first_df = pd.DataFrame(
-            [
-                {"date": dt.datetime(2026, 1, 5), "close": 100.0, "avwap_short_rolling_21_high": 101.0},
-                {"date": dt.datetime(2026, 1, 6), "close": 102.0, "avwap_short_rolling_21_high": 102.5},
-            ]
-        )
-        second_df = pd.DataFrame(
-            [
-                {"date": dt.datetime(2026, 1, 5), "close": 100.0, "avwap_short_rolling_21_high": 101.0},
-                {"date": dt.datetime(2026, 1, 7), "close": 104.0, "avwap_short_rolling_21_high": 103.5},
-            ]
-        )
-
-        first = create_candidate_zones_from_avwap(
-            first_df,
-            anchor_meta=anchor_meta,
-            zone_expand_pct=0.01,
-            symbol="AAPL",
-        )[0]
-        second = create_candidate_zones_from_avwap(
-            second_df,
-            anchor_meta=anchor_meta,
-            zone_expand_pct=0.01,
-            symbol="AAPL",
-        )[0]
-
-        self.assertEqual(first["zone_kind"], ZoneKind.AVWAP)
-        self.assertEqual(second["zone_kind"], ZoneKind.AVWAP)
-        self.assertEqual(first["zone_id"], second["zone_id"])
-        self.assertNotEqual(first["lower"], second["lower"])
-        self.assertNotEqual(first["upper"], second["upper"])
-
     def test_avwap_identity_uses_anchor_date_not_intraday_time_or_price(self) -> None:
         with self.Session() as session:
             first = upsert_zone(
@@ -348,9 +309,9 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             zone = upsert_zone(
                 session,
                 symbol="TSLA",
-                timeframe="1d",
+                timeframe="W",
                 zone_kind=ZoneKind.EVENT,
-                source=["swing_low"],
+                source=["swing_w"],
                 price_low=200.0,
                 price_high=210.0,
                 current_role="support",
@@ -388,9 +349,9 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             support = upsert_zone(
                 session,
                 symbol="TSLA",
-                timeframe="1d",
+                timeframe="W",
                 zone_kind=ZoneKind.EVENT,
-                source=["swing_low"],
+                source=["swing_w"],
                 price_low=200.0,
                 price_high=210.0,
                 current_role="support",
@@ -400,9 +361,9 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             expired = upsert_zone(
                 session,
                 symbol="TSLA",
-                timeframe="1d",
+                timeframe="W",
                 zone_kind=ZoneKind.EVENT,
-                source=["swing_high"],
+                source=["swing_w"],
                 price_low=260.0,
                 price_high=270.0,
                 current_role="resistance",
@@ -433,8 +394,6 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
                 session,
                 symbol="tsla",
                 replay_date=dt.datetime(2026, 2, 10),
-                max_support_zones=3,
-                max_resistance_zones=3,
             )
 
         self.assertEqual(len(result.support_zones), 1)
@@ -442,182 +401,6 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
         self.assertEqual(result.support_zones[0]["display_label"], "S1")
         self.assertEqual(result.resistance_zones, [])
         self.assertEqual([zone["zone_id"] for zone in result.all_zones], [support.zone_id])
-
-    def test_dashboard_shadow_persistence_is_idempotent(self) -> None:
-        support_zone = self._build_composite_dashboard_zone()
-
-        first = persist_dashboard_zones(
-            symbol="AAPL",
-            replay_date=dt.datetime(2026, 3, 1),
-            current_price=105.0,
-            atr_value=2.0,
-            support_zones=[support_zone],
-            resistance_zones=[],
-            session_factory=self.Session,
-        )
-        second = persist_dashboard_zones(
-            symbol="AAPL",
-            replay_date=dt.datetime(2026, 3, 1),
-            current_price=99.0,
-            atr_value=2.0,
-            support_zones=[support_zone],
-            resistance_zones=[],
-            session_factory=self.Session,
-        )
-
-        self.assertEqual(first.zone_count, 1)
-        self.assertEqual(first.snapshot_count, 1)
-        self.assertEqual(second.zone_count, 1)
-        self.assertEqual(second.snapshot_count, 1)
-
-        with self.Session() as session:
-            zone_count = session.scalar(select(func.count()).select_from(Zone))
-            snapshot_count = session.scalar(select(func.count()).select_from(ZoneDailySnapshot))
-            snapshot = session.scalars(select(ZoneDailySnapshot)).one()
-
-        self.assertEqual(zone_count, 3)
-        self.assertEqual(snapshot_count, 1)
-        self.assertEqual(snapshot.current_price, 99.0)
-        self.assertEqual(snapshot.distance_to_price, 0.0)
-
-    def test_merge_tracks_component_zone_ids_for_composite_identity(self) -> None:
-        merged = self._build_composite_dashboard_zone()
-
-        self.assertEqual(merged["zone_kind"], ZoneKind.COMPOSITE)
-        self.assertIn("zone_id", merged)
-        self.assertEqual(len(merged["merged_from_zone_ids"]), 2)
-        self.assertEqual(len(merged["source_components"]), 2)
-        self.assertNotEqual(merged["zone_id"], merged["merged_from_zone_ids"][0])
-
-        reversed_merge = merge_close_zones(
-            list(reversed(self._source_component_zones())),
-            merge_pct=0.10,
-            symbol="AAPL",
-        )[0]
-        self.assertEqual(reversed_merge["zone_id"], merged["zone_id"])
-
-    def test_existing_composite_id_survives_new_component_merge(self) -> None:
-        base_composite = self._build_composite_dashboard_zone()
-        new_component = {
-            "zone_id": "zone_component_event",
-            "zone_kind": ZoneKind.EVENT,
-            "type": "event_support_short",
-            "side": "support",
-            "lower": 100.0,
-            "upper": 102.0,
-            "center": 101.0,
-            "vp_volume": 0.0,
-            "anchor_count": 1,
-            "avwap_strength": 0.0,
-            "timeframes": {"short"},
-            "source_types": {"gap_up"},
-            "source_label": "Gap up",
-            "source_zone_ids": ["zone_component_event"],
-            "primary_timeframe": "short",
-        }
-
-        expanded = merge_close_zones(
-            [base_composite, new_component],
-            merge_pct=0.10,
-            symbol="AAPL",
-        )[0]
-
-        self.assertEqual(expanded["zone_id"], base_composite["zone_id"])
-        self.assertEqual(
-            sorted(expanded["merged_from_zone_ids"]),
-            ["zone_component_avwap", "zone_component_event", "zone_component_vp"],
-        )
-
-    def test_composite_upsert_reuses_existing_id_by_price_iou_across_role_flip(self) -> None:
-        with self.Session() as session:
-            initial = upsert_zone(
-                session,
-                symbol="AAPL",
-                timeframe="short",
-                zone_kind=ZoneKind.COMPOSITE,
-                source=["avwap_short_rolling", "vp_short"],
-                price_low=100.0,
-                price_high=110.0,
-                current_role=ZoneRole.RESISTANCE,
-                merged_from_zone_ids=["source-a", "source-b"],
-            )
-            initial_id = initial.zone_id
-
-            flipped = upsert_zone(
-                session,
-                symbol="AAPL",
-                timeframe="short,w",
-                zone_kind=ZoneKind.COMPOSITE,
-                source=["avwap_short_rolling", "gap_up", "vp_short"],
-                price_low=101.0,
-                price_high=110.0,
-                current_role=ZoneRole.SUPPORT,
-                merged_from_zone_ids=["source-a", "source-b", "source-c"],
-            )
-            zone_count = session.scalar(select(func.count()).select_from(Zone))
-
-        self.assertEqual(flipped.zone_id, initial_id)
-        self.assertEqual(flipped.current_role, ZoneRole.SUPPORT)
-        self.assertEqual(flipped.timeframe, "short,w")
-        self.assertEqual(zone_count, 1)
-
-    def test_composite_upsert_prefers_iou_match_over_incoming_zone_id(self) -> None:
-        with self.Session() as session:
-            existing = upsert_zone(
-                session,
-                symbol="AAPL",
-                timeframe="short",
-                zone_kind=ZoneKind.COMPOSITE,
-                source=["avwap_short_rolling", "vp_short"],
-                price_low=100.0,
-                price_high=110.0,
-                current_role=ZoneRole.RESISTANCE,
-                merged_from_zone_ids=["source-a", "source-b"],
-            )
-
-            updated = upsert_zone(
-                session,
-                symbol="AAPL",
-                timeframe="short",
-                zone_kind=ZoneKind.COMPOSITE,
-                zone_id="zone_intraday_merge_candidate",
-                source=["gap_up", "vp_short"],
-                price_low=101.0,
-                price_high=110.0,
-                current_role=ZoneRole.SUPPORT,
-                merged_from_zone_ids=["source-b", "source-c"],
-            )
-            zone_count = session.scalar(select(func.count()).select_from(Zone))
-
-        self.assertEqual(updated.zone_id, existing.zone_id)
-        self.assertNotEqual(updated.zone_id, "zone_intraday_merge_candidate")
-        self.assertEqual(updated.current_role, ZoneRole.SUPPORT)
-        self.assertEqual(zone_count, 1)
-
-    def test_dashboard_shadow_persistence_writes_components_and_composite(self) -> None:
-        composite = self._build_composite_dashboard_zone()
-
-        persist_dashboard_zones(
-            symbol="AAPL",
-            replay_date=dt.datetime(2026, 3, 2),
-            current_price=105.0,
-            atr_value=2.0,
-            support_zones=[composite],
-            resistance_zones=[],
-            session_factory=self.Session,
-        )
-
-        with self.Session() as session:
-            zones = session.scalars(select(Zone)).all()
-            snapshots = session.scalars(select(ZoneDailySnapshot)).all()
-
-        self.assertEqual(len(zones), 3)
-        self.assertEqual(len(snapshots), 1)
-        persisted_composite = next(zone for zone in zones if zone.zone_kind == ZoneKind.COMPOSITE)
-        self.assertEqual(
-            sorted(persisted_composite.merged_from_zone_ids),
-            sorted(composite["merged_from_zone_ids"]),
-        )
 
     def test_event_ttl_expires_event_but_not_vp_or_invalidated(self) -> None:
         with self.Session() as session:
@@ -673,50 +456,95 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             self.assertEqual(vp_zone.status, ZoneStatus.ACTIVE)
             self.assertEqual(invalidated_zone.status, ZoneStatus.INVALIDATED)
 
-    def test_composite_lifecycle_follows_sources(self) -> None:
+    def test_weekly_swing_zone_does_not_expire_by_event_ttl(self) -> None:
         with self.Session() as session:
-            source_a = upsert_zone(
+            weekly_swing = upsert_zone(
                 session,
-                symbol="AAPL",
-                timeframe="1d",
+                symbol="YINN",
+                timeframe="W",
                 zone_kind=ZoneKind.EVENT,
-                source=["swing_high"],
-                price_low=100.0,
-                price_high=102.0,
-                current_role=ZoneRole.RESISTANCE,
-                origin_bar=dt.datetime(2026, 1, 1),
-                origin_event_id="source-a",
-            )
-            source_b = upsert_zone(
-                session,
-                symbol="AAPL",
-                timeframe="1d",
-                zone_kind=ZoneKind.EVENT,
-                source=["swing_low"],
-                price_low=101.0,
-                price_high=103.0,
+                source=["swing_w"],
+                price_low=40.0,
+                price_high=41.0,
                 current_role=ZoneRole.RESISTANCE,
                 origin_bar=dt.datetime(2026, 1, 2),
-                origin_event_id="source-b",
+                origin_event_id="weekly-swing",
+                origin_event_type="swing",
             )
-            composite = upsert_zone(
+
+            count = expire_event_zones(
                 session,
-                symbol="AAPL",
-                timeframe="1d",
-                zone_kind=ZoneKind.COMPOSITE,
-                source=["swing_high", "swing_low"],
-                price_low=100.0,
-                price_high=103.0,
-                current_role=ZoneRole.RESISTANCE,
-                merged_from_zone_ids=[source_a.zone_id, source_b.zone_id],
+                current_ts=dt.datetime(2026, 5, 11),
+                bars_since_created_by_zone_id={weekly_swing.zone_id: 100},
             )
-            source_a.status = ZoneStatus.EXPIRED
-            source_b.status = ZoneStatus.EXPIRED
 
-            changed = apply_composite_lifecycle(session, current_ts=dt.datetime(2026, 4, 1))
+            self.assertEqual(count, 0)
+            self.assertEqual(weekly_swing.status, ZoneStatus.ACTIVE)
+            self.assertIsNone(weekly_swing.expired_ts)
 
-            self.assertEqual(changed, 1)
-            self.assertEqual(composite.status, ZoneStatus.EXPIRED)
+    def test_weekly_swing_zone_expires_after_182_calendar_days(self) -> None:
+        with self.Session() as session:
+            weekly_swing = upsert_zone(
+                session,
+                symbol="YINN",
+                timeframe="W",
+                zone_kind=ZoneKind.EVENT,
+                source=["swing_w"],
+                price_low=40.0,
+                price_high=41.0,
+                current_role=ZoneRole.RESISTANCE,
+                origin_bar=dt.datetime(2025, 7, 5),
+                origin_event_id="weekly-swing-old",
+                origin_event_type="swing",
+            )
+
+            count = expire_event_zones(
+                session,
+                current_ts=dt.datetime(2026, 1, 3),
+                bars_since_created_by_zone_id={weekly_swing.zone_id: 1},
+            )
+
+            self.assertEqual(count, 1)
+            self.assertEqual(weekly_swing.status, ZoneStatus.EXPIRED)
+            self.assertEqual(weekly_swing.expired_ts, dt.datetime(2026, 1, 3))
+
+    def test_reselected_weekly_swing_zone_is_reactivated(self) -> None:
+        with self.Session() as session:
+            weekly_swing = upsert_zone(
+                session,
+                symbol="YINN",
+                timeframe="W",
+                zone_kind=ZoneKind.EVENT,
+                source=["swing_w"],
+                price_low=40.0,
+                price_high=41.0,
+                current_role=ZoneRole.RESISTANCE,
+                origin_bar=dt.datetime(2026, 1, 2),
+                origin_event_id="weekly-swing",
+                origin_event_type="swing",
+            )
+            weekly_swing.status = ZoneStatus.EXPIRED
+            weekly_swing.expired_ts = dt.datetime(2026, 4, 1)
+            session.flush()
+
+            updated = upsert_zone(
+                session,
+                symbol="YINN",
+                timeframe="W",
+                zone_kind=ZoneKind.EVENT,
+                source=["swing_w"],
+                price_low=40.0,
+                price_high=41.0,
+                current_role=ZoneRole.SUPPORT,
+                origin_bar=dt.datetime(2026, 1, 2),
+                origin_event_id="weekly-swing",
+                origin_event_type="swing",
+            )
+
+            self.assertEqual(updated.zone_id, weekly_swing.zone_id)
+            self.assertEqual(updated.status, ZoneStatus.ACTIVE)
+            self.assertEqual(updated.current_role, ZoneRole.SUPPORT)
+            self.assertIsNone(updated.expired_ts)
 
     def test_zero_lookback_starts_warmup_at_first_available_bar(self) -> None:
         prices = pd.DataFrame(
@@ -766,8 +594,9 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
                     open=101.0,
                     high=103.0,
                     low=99.0,
-                    close=101.0,
+                    close=100.8,
                     atr=2.0,
+                    previous_close=100.5,
                 ),
                 breakout_buffer=0.2,
             )
@@ -775,7 +604,6 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             self.assertEqual(zone.close_inside_count, 1)
             self.assertEqual(zone.touch_count, 1)
             self.assertEqual(zone.break_count, 1)
-            self.assertEqual(zone.false_break_count, 1)
 
     def test_breakout_confirmed_flips_zone_and_records_event(self) -> None:
         with self.Session() as session:
@@ -802,6 +630,10 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
                     low=100.5,
                     close=102.5,
                     atr=2.0,
+                    previous_close=100.5,
+                    volume=1000.0,
+                    volume_p80_20=800.0,
+                    bar_index=10,
                 ),
             )
 
@@ -812,6 +644,41 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             self.assertEqual(zone.current_role, ZoneRole.SUPPORT)
             self.assertEqual(zone.confirmed_breakout_count, 1)
             self.assertEqual(session.scalar(select(func.count()).select_from(BreakoutEvent)), 1)
+
+    def test_intraday_center_cross_without_close_cross_does_not_create_breakout_event(self) -> None:
+        with self.Session() as session:
+            zone = upsert_zone(
+                session,
+                symbol="AAPL",
+                timeframe="1d",
+                zone_kind=ZoneKind.EVENT,
+                source=["swing_high"],
+                price_low=100.0,
+                price_high=102.0,
+                current_role=ZoneRole.RESISTANCE,
+                origin_bar=dt.datetime(2026, 1, 1),
+                origin_event_id="no-false-breakout-zone",
+            )
+
+            event = process_zone_bar(
+                session,
+                zone,
+                BarInput(
+                    timestamp=dt.datetime(2026, 1, 4),
+                    open=100.5,
+                    high=102.5,
+                    low=100.2,
+                    close=100.8,
+                    atr=2.0,
+                    previous_close=100.5,
+                    volume=1000.0,
+                    volume_p80_20=800.0,
+                    bar_index=10,
+                ),
+            )
+
+            self.assertIsNone(event)
+            self.assertEqual(session.scalar(select(func.count()).select_from(BreakoutEvent)), 0)
 
     def test_breakout_retest_success_marks_zone_retested(self) -> None:
         with self.Session() as session:
@@ -830,19 +697,33 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             process_zone_bar(
                 session,
                 zone,
-                BarInput(dt.datetime(2026, 1, 4), open=101.0, high=104.0, low=100.5, close=102.5, atr=2.0),
+                BarInput(
+                    dt.datetime(2026, 1, 4),
+                    open=101.0,
+                    high=104.0,
+                    low=100.5,
+                    close=102.5,
+                    atr=2.0,
+                    previous_close=100.5,
+                    volume=1000.0,
+                    volume_p80_20=800.0,
+                    bar_index=10,
+                ),
             )
             event = process_zone_bar(
                 session,
                 zone,
-                BarInput(dt.datetime(2026, 1, 6), open=103.0, high=103.5, low=101.5, close=102.8, atr=2.0),
+                BarInput(dt.datetime(2026, 1, 6), open=103.0, high=103.5, low=100.8, close=102.8, atr=2.0, bar_index=12),
             )
+            events = session.scalars(select(BreakoutEvent).order_by(BreakoutEvent.created_ts)).all()
 
             self.assertEqual(event.status, BreakoutEventStatus.RETEST_SUCCESS)
+            self.assertEqual([row.status for row in events], [BreakoutEventStatus.CONFIRMED, BreakoutEventStatus.RETEST_SUCCESS])
+            self.assertEqual(events[1].metadata_json["parent_breakout_event_id"], events[0].breakout_event_id)
             self.assertEqual(zone.status, ZoneStatus.RETESTED)
             self.assertEqual(zone.current_role, ZoneRole.SUPPORT)
 
-    def test_breakout_failure_invalidates_zone(self) -> None:
+    def test_breakout_retest_requires_wick_only_center_retest(self) -> None:
         with self.Session() as session:
             zone = upsert_zone(
                 session,
@@ -854,22 +735,238 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
                 price_high=102.0,
                 current_role=ZoneRole.RESISTANCE,
                 origin_bar=dt.datetime(2026, 1, 1),
-                origin_event_id="failure-zone",
-            )
-            process_zone_bar(
-                session,
-                zone,
-                BarInput(dt.datetime(2026, 1, 4), open=101.0, high=104.0, low=100.5, close=102.5, atr=2.0),
+                origin_event_id="body-cross-retest-zone",
             )
             event = process_zone_bar(
                 session,
                 zone,
-                BarInput(dt.datetime(2026, 1, 6), open=101.0, high=101.5, low=98.5, close=99.7, atr=2.0),
+                BarInput(
+                    dt.datetime(2026, 1, 4),
+                    open=101.0,
+                    high=104.0,
+                    low=100.5,
+                    close=102.5,
+                    atr=2.0,
+                    previous_close=100.5,
+                    volume=1000.0,
+                    volume_p80_20=800.0,
+                    bar_index=10,
+                ),
+            )
+            self.assertEqual(event.status, BreakoutEventStatus.CONFIRMED)
+
+            event = process_zone_bar(
+                session,
+                zone,
+                BarInput(dt.datetime(2026, 1, 6), open=100.8, high=103.5, low=100.5, close=102.8, atr=2.0, bar_index=12),
             )
 
-            self.assertEqual(event.status, BreakoutEventStatus.FAILED_BREAKOUT)
-            self.assertEqual(zone.status, ZoneStatus.INVALIDATED)
-            self.assertIsNotNone(zone.invalidated_ts)
+            self.assertEqual(event.status, BreakoutEventStatus.CONFIRMED)
+            self.assertEqual(zone.status, ZoneStatus.FLIPPED)
+
+    def test_breakout_retest_is_never_valid_after_three_trading_bars(self) -> None:
+        with self.Session() as session:
+            zone = upsert_zone(
+                session,
+                symbol="AAPL",
+                timeframe="1d",
+                zone_kind=ZoneKind.EVENT,
+                source=["swing_high"],
+                price_low=100.0,
+                price_high=102.0,
+                current_role=ZoneRole.RESISTANCE,
+                origin_bar=dt.datetime(2026, 1, 1),
+                origin_event_id="late-retest-zone",
+            )
+            process_zone_bar(
+                session,
+                zone,
+                BarInput(
+                    dt.datetime(2026, 1, 4),
+                    open=101.0,
+                    high=104.0,
+                    low=100.5,
+                    close=102.5,
+                    atr=2.0,
+                    previous_close=100.5,
+                    volume=1000.0,
+                    volume_p80_20=800.0,
+                    bar_index=10,
+                ),
+                config=BreakoutStateConfig(retest_window_bars=10),
+            )
+
+            event = process_zone_bar(
+                session,
+                zone,
+                BarInput(dt.datetime(2026, 1, 10), open=103.0, high=103.5, low=100.8, close=102.8, atr=2.0, bar_index=14),
+                config=BreakoutStateConfig(retest_window_bars=10),
+            )
+
+            self.assertEqual(event.status, BreakoutEventStatus.CONFIRMED)
+            self.assertEqual(session.scalar(select(func.count()).select_from(BreakoutEvent)), 1)
+
+    def test_close_back_below_center_does_not_create_new_event(self) -> None:
+        with self.Session() as session:
+            zone = upsert_zone(
+                session,
+                symbol="AAPL",
+                timeframe="1d",
+                zone_kind=ZoneKind.EVENT,
+                source=["swing_high"],
+                price_low=100.0,
+                price_high=102.0,
+                current_role=ZoneRole.RESISTANCE,
+                origin_bar=dt.datetime(2026, 1, 1),
+                origin_event_id="no-failure-zone",
+            )
+            process_zone_bar(
+                session,
+                zone,
+                BarInput(
+                    dt.datetime(2026, 1, 4),
+                    open=101.0,
+                    high=104.0,
+                    low=100.5,
+                    close=102.5,
+                    atr=2.0,
+                    previous_close=100.5,
+                    volume=1000.0,
+                    volume_p80_20=800.0,
+                    bar_index=10,
+                ),
+            )
+            event = process_zone_bar(
+                session,
+                zone,
+                BarInput(dt.datetime(2026, 1, 6), open=101.0, high=101.5, low=98.5, close=99.7, atr=2.0, bar_index=12),
+            )
+
+            self.assertEqual(event.status, BreakoutEventStatus.CONFIRMED)
+            self.assertEqual(zone.status, ZoneStatus.FLIPPED)
+            self.assertIsNone(zone.invalidated_ts)
+            markers = load_breakout_events(
+                session,
+                symbol="AAPL",
+                start_time=dt.datetime(2026, 1, 6),
+                end_time=dt.datetime(2026, 1, 6),
+            )
+            self.assertEqual(markers, [])
+
+    def test_breakout_without_volume_confirmation_is_weak_and_does_not_fail(self) -> None:
+        with self.Session() as session:
+            zone = upsert_zone(
+                session,
+                symbol="AAPL",
+                timeframe="1d",
+                zone_kind=ZoneKind.EVENT,
+                source=["swing_high"],
+                price_low=100.0,
+                price_high=102.0,
+                current_role=ZoneRole.RESISTANCE,
+                origin_bar=dt.datetime(2026, 1, 1),
+                origin_event_id="weak-breakout-zone",
+            )
+
+            event = process_zone_bar(
+                session,
+                zone,
+                BarInput(
+                    dt.datetime(2026, 1, 4),
+                    open=101.0,
+                    high=104.0,
+                    low=100.5,
+                    close=102.5,
+                    atr=2.0,
+                    previous_close=100.5,
+                    volume=500.0,
+                    volume_p80_20=800.0,
+                    bar_index=10,
+                ),
+            )
+
+            self.assertEqual(event.status, BreakoutEventStatus.TRUE_BREAKOUT_WEAK)
+            self.assertEqual(zone.status, ZoneStatus.FLIPPED)
+
+            event = process_zone_bar(
+                session,
+                zone,
+                BarInput(dt.datetime(2026, 1, 6), open=101.0, high=101.5, low=98.5, close=99.7, atr=2.0, bar_index=12),
+            )
+
+            self.assertEqual(event.status, BreakoutEventStatus.TRUE_BREAKOUT_WEAK)
+
+    def test_down_close_cross_does_not_create_breakout_event(self) -> None:
+        with self.Session() as session:
+            zone = upsert_zone(
+                session,
+                symbol="AAPL",
+                timeframe="1d",
+                zone_kind=ZoneKind.EVENT,
+                source=["swing_low"],
+                price_low=100.0,
+                price_high=102.0,
+                current_role=ZoneRole.SUPPORT,
+                origin_bar=dt.datetime(2026, 1, 1),
+                origin_event_id="down-cross-zone",
+            )
+
+            event = process_zone_bar(
+                session,
+                zone,
+                BarInput(
+                    dt.datetime(2026, 1, 4),
+                    open=101.2,
+                    high=101.8,
+                    low=98.5,
+                    close=99.6,
+                    atr=2.0,
+                    previous_close=101.5,
+                    volume=1000.0,
+                    volume_p80_20=800.0,
+                    bar_index=10,
+                ),
+            )
+
+            self.assertIsNone(event)
+            self.assertEqual(session.scalar(select(func.count()).select_from(BreakoutEvent)), 0)
+
+    def test_breakout_direction_is_inferred_from_close_cross_not_zone_role(self) -> None:
+        with self.Session() as session:
+            zone = upsert_zone(
+                session,
+                symbol="AAPL",
+                timeframe="w",
+                zone_kind=ZoneKind.EVENT,
+                source=["swing_w"],
+                price_low=100.0,
+                price_high=102.0,
+                current_role=ZoneRole.SUPPORT,
+                origin_bar=dt.datetime(2026, 1, 1),
+                origin_event_id="role-independent-breakout-zone",
+            )
+
+            event = process_zone_bar(
+                session,
+                zone,
+                BarInput(
+                    dt.datetime(2026, 1, 4),
+                    open=100.6,
+                    high=103.0,
+                    low=100.4,
+                    close=102.2,
+                    atr=2.0,
+                    previous_close=100.5,
+                    volume=1000.0,
+                    volume_p80_20=800.0,
+                    bar_index=10,
+                ),
+            )
+
+            self.assertIsNotNone(event)
+            self.assertEqual(event.direction, "up")
+            self.assertEqual(event.status, BreakoutEventStatus.CONFIRMED)
+            self.assertEqual(zone.current_role, ZoneRole.SUPPORT)
 
     def test_symbol_lifecycle_warmup_processes_two_year_batch_once(self) -> None:
         prices = self._warmup_prices()
@@ -939,18 +1036,11 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             provider=None,
             df_calc_daily=prices,
             config=ZoneGenerationConfig(
-                vp_lookback_days=21,
-                vp_bins=20,
-                weekly_vp_lookback=63,
-                weekly_vp_bins=10,
+                long_vp_lookback_days=63,
+                long_vp_bins=10,
                 zone_expand_pct=0.001,
-                hv_node_quantile=0.8,
-                merge_pct=0.002,
                 max_resistance_zones=4,
                 max_support_zones=4,
-                reaction_lookahead=3,
-                reaction_return_threshold=0.01,
-                min_touch_gap=2,
             ),
             interval_history_loader=lambda symbol, trading_dates, provider, interval: pd.DataFrame(),
         )
@@ -960,9 +1050,7 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
         self.assertTrue(
             all("zone_id" in zone and "zone_kind" in zone for zone in generated.all_candidate_zones)
         )
-        self.assertEqual(generated.short_vp_context.mode, "short disabled")
-        self.assertEqual(generated.short_vp_context.zones_raw, [])
-        self.assertGreater(len(generated.long_vp_context.zones_raw), 0)
+        self.assertGreater(len(generated.long_vp_profile_df), 0)
         self.assertIsInstance(generated.support_zones, list)
         self.assertIsInstance(generated.resistance_zones, list)
 
@@ -1007,224 +1095,120 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             provider="yfinance",
             df_calc_daily=prices,
             config=ZoneGenerationConfig(
-                short_vp_lookback_days=21,
-                short_vp_bins=20,
                 long_vp_lookback_days=63,
                 long_vp_bins=20,
                 zone_expand_pct=0.001,
-                hv_node_quantile=0.8,
-                merge_pct=0.002,
                 max_resistance_zones=4,
                 max_support_zones=4,
-                reaction_lookahead=3,
-                reaction_return_threshold=0.01,
-                min_touch_gap=2,
             ),
             interval_history_loader=loader,
         )
 
-        self.assertEqual(generated.short_vp_context.mode, "short disabled")
-        self.assertEqual(generated.long_vp_context.mode, "long 63 trading days 5m")
+        self.assertFalse(generated.long_vp_profile_df.empty)
         self.assertEqual(
             sorted({source for zone in generated.all_candidate_zones for source in zone.get("source_types", set()) if source.startswith("vp_")}),
-            ["vp_long"],
+            [],
         )
 
-    def test_rolling_avwap_uses_only_long_trading_day_window(self) -> None:
-        prices = pd.DataFrame(
-            [
-                {
-                    "date": dt.datetime(2024, 1, 1) + dt.timedelta(days=index),
-                    "open": 100.0 + index * 0.03 + (index % 13) * 0.2,
-                    "high": 102.0 + index * 0.03 + (index % 17) * 0.25,
-                    "low": 98.0 + index * 0.03 - (index % 11) * 0.2,
-                    "close": 100.0 + index * 0.03 + (1.0 if index % 9 else -1.0),
-                    "volume": 1_000_000 + index * 1_000,
-                }
-                for index in range(420)
-            ]
-        )
+    def test_zone_generation_uses_weekly_swing_price_zones_only(self) -> None:
+        prices = self._zone_generation_prices()
 
         generated = generate_zones_for_replay(
             symbol="AAPL",
             provider=None,
             df_calc_daily=prices,
             config=ZoneGenerationConfig(
-                short_vp_lookback_days=21,
-                short_vp_bins=20,
                 long_vp_lookback_days=63,
                 long_vp_bins=20,
                 zone_expand_pct=0.001,
-                hv_node_quantile=0.8,
-                merge_pct=0.002,
                 max_resistance_zones=8,
                 max_support_zones=8,
-                reaction_lookahead=3,
-                reaction_return_threshold=0.01,
-                min_touch_gap=2,
             ),
             interval_history_loader=lambda symbol, trading_dates, provider, interval: pd.DataFrame(),
         )
 
-        rolling_sources = {
+        zone_sources = {
             source
             for zone in generated.all_candidate_zones
             for source in zone.get("source_types", set())
-            if source.startswith("avwap_") and source.endswith("_rolling")
         }
 
-        self.assertIn("avwap_long_rolling", rolling_sources)
-        self.assertNotIn("avwap_short_rolling", rolling_sources)
-        self.assertNotIn("avwap_D_rolling", rolling_sources)
-        self.assertNotIn("avwap_W_rolling", rolling_sources)
+        self.assertEqual(zone_sources, {"swing_W"})
+        self.assertFalse(
+            {
+                source
+                for source in zone_sources
+                if source.startswith("avwap_") or source.startswith("vp_")
+            }
+        )
         self.assertTrue(
             all(
-                meta.get("anchor_family") != "rolling"
-                for meta in generated.weekly_anchor_meta.values()
+                meta.get("anchor_family") == "swing" and meta.get("timeframe") == "W"
+                for meta in generated.daily_anchor_meta.values()
             )
         )
-        weekly_nonrolling_search_bars = {
-            meta.get("anchor_search_bars")
-            for meta in generated.weekly_anchor_meta.values()
-            if meta.get("anchor_family") in {"swing", "event"}
-        }
-        self.assertEqual(weekly_nonrolling_search_bars, {52})
-
-    def test_weekly_avwap_defaults_to_one_year_without_rolling_windows(self) -> None:
-        weekly_prices = pd.DataFrame(
-            [
-                {
-                    "date": dt.datetime(2024, 1, 5) + dt.timedelta(days=index * 7),
-                    "open": 100.0 + index * 0.2,
-                    "high": 102.0 + index * 0.2 + (index % 5) * 0.3,
-                    "low": 98.0 + index * 0.2 - (index % 4) * 0.25,
-                    "close": 100.0 + index * 0.2 + (1.0 if index % 7 else -1.0),
-                    "volume": 1_000_000 + index * 10_000,
-                }
-                for index in range(80)
-            ]
-        )
-
-        _features, anchor_meta = build_avwap_features(weekly_prices, timeframe="W")
-
-        self.assertTrue(anchor_meta)
-        self.assertTrue(all(meta.get("anchor_family") != "rolling" for meta in anchor_meta.values()))
-        self.assertEqual(
+        self.assertFalse(
             {
-                meta.get("anchor_search_bars")
-                for meta in anchor_meta.values()
-                if meta.get("anchor_family") in {"swing", "event"}
-            },
-            {52},
+                source
+                for zone in generated.all_candidate_zones
+                for source in zone.get("source_types", set())
+                if source in {"avwap_D_swing", "avwap_D_event"}
+            }
         )
-
-    def test_gap_events_require_gap_to_remain_at_close(self) -> None:
-        prices = pd.DataFrame(
-            [
-                {"date": dt.datetime(2026, 1, 1), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1000},
-                {"date": dt.datetime(2026, 1, 2), "open": 110.0, "high": 111.0, "low": 99.0, "close": 99.5, "volume": 1000},
-                {"date": dt.datetime(2026, 1, 3), "open": 104.0, "high": 106.0, "low": 103.0, "close": 105.0, "volume": 1000},
-                {"date": dt.datetime(2026, 1, 4), "open": 95.0, "high": 106.0, "low": 94.0, "close": 106.0, "volume": 1000},
-                {"date": dt.datetime(2026, 1, 5), "open": 105.0, "high": 107.0, "low": 104.0, "close": 106.5, "volume": 1000},
-                {"date": dt.datetime(2026, 1, 6), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1000},
-            ]
-        )
-
-        anchors = find_anchor_points(prices, timeframe="D", rolling_window_bars=(), event_search_bars=6)
-
-        self.assertEqual(anchors["gap_up"]["index"], 2)
-        self.assertNotEqual(anchors["gap_up"]["index"], 1)
-        self.assertNotIn("gap_down", anchors)
-
-    def test_gap_down_event_requires_gap_to_remain_at_close(self) -> None:
-        prices = pd.DataFrame(
-            [
-                {"date": dt.datetime(2026, 1, 1), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1000},
-                {"date": dt.datetime(2026, 1, 2), "open": 90.0, "high": 101.0, "low": 89.0, "close": 101.0, "volume": 1000},
-                {"date": dt.datetime(2026, 1, 3), "open": 97.0, "high": 98.0, "low": 95.0, "close": 96.0, "volume": 1000},
-                {"date": dt.datetime(2026, 1, 4), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1000},
-            ]
-        )
-
-        anchors = find_anchor_points(prices, timeframe="D", rolling_window_bars=(), event_search_bars=4)
-
-        self.assertEqual(anchors["gap_down"]["index"], 2)
-        self.assertNotEqual(anchors["gap_down"]["index"], 1)
-        self.assertNotIn("gap_up", anchors)
-
-    def test_event_anchors_require_high_relative_volume(self) -> None:
+    def test_recent_swing_points_require_high_relative_volume_and_two_bar_confirmation(self) -> None:
         rows = []
-        for index in range(70):
+        for index in range(36):
             rows.append(
                 {
-                    "date": dt.datetime(2026, 1, 1) + dt.timedelta(days=index),
-                    "open": 100.0,
-                    "high": 101.0,
-                    "low": 99.0,
-                    "close": 100.0,
-                    "volume": 1_000.0,
-                }
-            )
-        rows[65].update({"open": 120.0, "high": 121.0, "low": 119.0, "close": 120.5, "volume": 100.0})
-        rows[66].update({"open": 130.0, "high": 131.0, "low": 129.0, "close": 130.5, "volume": 2_000.0})
-        rows[67].update({"open": 120.0, "high": 121.0, "low": 100.0, "close": 101.0, "volume": 100.0})
-        rows[68].update({"open": 100.0, "high": 121.0, "low": 99.0, "close": 120.0, "volume": 2_000.0})
-        prices = pd.DataFrame(rows)
-
-        anchors = find_anchor_points(prices, timeframe="D", rolling_window_bars=(), event_search_bars=60)
-
-        self.assertEqual(anchors["gap_up"]["index"], 66)
-        self.assertEqual(anchors["big_up"]["index"], 68)
-
-    def test_rolling_anchors_require_high_relative_volume(self) -> None:
-        rows = []
-        for index in range(70):
-            rows.append(
-                {
-                    "date": dt.datetime(2026, 1, 1) + dt.timedelta(days=index),
-                    "open": 100.0,
-                    "high": 100.0 + index * 0.01,
-                    "low": 95.0,
-                    "close": 100.0,
-                    "volume": 1_000.0,
-                }
-            )
-        rows[69]["high"] = 150.0
-        rows[69]["volume"] = 100.0
-        rows[68]["low"] = 80.0
-        rows[68]["volume"] = 2_000.0
-        prices = pd.DataFrame(rows)
-
-        anchors = find_anchor_points(prices, timeframe="D", rolling_window_bars=(21,), event_search_bars=1)
-
-        self.assertNotIn("rolling_21_high", anchors)
-        self.assertEqual(anchors["rolling_21_low"]["index"], 68)
-
-    def test_swing_anchors_require_high_relative_volume(self) -> None:
-        rows = []
-        for index in range(80):
-            rows.append(
-                {
-                    "date": dt.datetime(2026, 1, 1) + dt.timedelta(days=index),
+                    "date": dt.datetime(2026, 1, 2) + dt.timedelta(days=index * 7),
                     "open": 100.0,
                     "high": 100.0,
                     "low": 95.0,
-                    "close": 100.0,
+                    "close": 98.0,
                     "volume": 1_000.0,
                 }
             )
-        for index, high in [(27, 100.0), (28, 101.0), (29, 102.0), (30, 120.0), (31, 102.0), (32, 101.0), (33, 100.0)]:
-            rows[index]["high"] = high
-        rows[30]["volume"] = 100.0
-        for index, high in [(47, 100.0), (48, 101.0), (49, 102.0), (50, 115.0), (51, 102.0), (52, 101.0), (53, 100.0)]:
-            rows[index]["high"] = high
-        rows[50]["volume"] = 2_000.0
-        prices = pd.DataFrame(rows)
 
-        anchors = find_anchor_points(prices, timeframe="D", rolling_window_bars=(), event_search_bars=1)
+        for index, high, volume in [
+            (22, 101.0, 1_000.0),
+            (23, 102.0, 1_000.0),
+            (24, 120.0, 900.0),
+            (25, 102.0, 1_000.0),
+            (26, 101.0, 1_000.0),
+            (29, 101.0, 1_000.0),
+            (30, 102.0, 1_000.0),
+            (31, 118.0, 2_000.0),
+            (32, 102.0, 1_000.0),
+            (33, 101.0, 1_000.0),
+        ]:
+            rows[index]["high"] = high
+            rows[index]["volume"] = volume
 
-        self.assertEqual(anchors["recent_swing_high"]["index"], 50)
-        self.assertNotIn("previous_swing_high", anchors)
+        for index, low, volume in [
+            (18, 94.0, 1_000.0),
+            (19, 93.0, 1_000.0),
+            (20, 80.0, 900.0),
+            (21, 93.0, 1_000.0),
+            (22, 94.0, 1_000.0),
+            (27, 94.0, 1_000.0),
+            (28, 93.0, 1_000.0),
+            (29, 82.0, 2_000.0),
+            (30, 93.0, 1_000.0),
+            (31, 94.0, 2_000.0),
+        ]:
+            rows[index]["low"] = low
+            rows[index]["volume"] = volume
+
+        points = find_recent_swing_points(
+            pd.DataFrame(rows),
+            timeframe="W",
+            max_points_per_side=3,
+        )
+
+        self.assertEqual(
+            [(point["side"], point["index"]) for point in points],
+            [("support", 29), ("resistance", 31)],
+        )
 
     def test_zone_ranking_uses_only_center_band_volume(self) -> None:
         prices = pd.DataFrame(
@@ -1284,18 +1268,11 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             symbol="AAPL",
             provider=None,
             config=ZoneGenerationConfig(
-                vp_lookback_days=21,
-                vp_bins=20,
-                weekly_vp_lookback=63,
-                weekly_vp_bins=10,
+                long_vp_lookback_days=63,
+                long_vp_bins=10,
                 zone_expand_pct=0.001,
-                hv_node_quantile=0.8,
-                merge_pct=0.002,
                 max_resistance_zones=4,
                 max_support_zones=4,
-                reaction_lookahead=3,
-                reaction_return_threshold=0.01,
-                min_touch_gap=2,
             ),
             interval_history_loader=lambda symbol, trading_dates, provider, interval: pd.DataFrame(),
             include_all_candidates=True,
@@ -1310,10 +1287,282 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             )
             zone_count = session.scalar(select(func.count()).select_from(Zone))
             snapshot_count = session.scalar(select(func.count()).select_from(ZoneDailySnapshot))
+            observation_count = session.scalar(select(func.count()).select_from(MarketObservation))
 
         self.assertEqual(result.processed_bars, len(prices))
         self.assertGreater(zone_count, 0)
         self.assertGreater(snapshot_count, 0)
+        self.assertGreater(observation_count, 0)
+        self.assertEqual(result.observations, observation_count)
+
+    def test_warmup_records_volume_price_pattern_events(self) -> None:
+        rows = []
+        close = 100.0
+        start = dt.datetime(2026, 1, 1)
+        for index in range(22):
+            open_price = close
+            close = close * 1.01
+            rows.append(
+                {
+                    "date": start + dt.timedelta(days=index),
+                    "open": open_price,
+                    "high": close + 0.2,
+                    "low": open_price - 0.2,
+                    "close": close,
+                    "volume": 100.0 + index,
+                }
+            )
+        previous_close = close
+        rows.append(
+            {
+                "date": start + dt.timedelta(days=22),
+                "open": previous_close,
+                "high": previous_close + 3.0,
+                "low": previous_close - 1.0,
+                "close": previous_close * 1.004,
+                "volume": 1_000.0,
+            }
+        )
+        prices = pd.DataFrame(rows)
+
+        with self.Session() as session:
+            result = ensure_symbol_lifecycle_ready(
+                session,
+                symbol="AAPL",
+                price_df=prices,
+                zone_provider=lambda history, bar: [],
+                lookback_years=0,
+                snapshot_start_date=start,
+                snapshot_end_date=start + dt.timedelta(days=22),
+                as_of_date=start + dt.timedelta(days=22),
+                force=True,
+            )
+            events = session.scalars(select(PatternEvent).order_by(PatternEvent.event_type)).all()
+
+        event_types = {event.event_type for event in events}
+        self.assertIn("volume_stall_up", event_types)
+        self.assertIn("volume_long_upper_wick", event_types)
+        self.assertEqual(result.pattern_events, len(events))
+        stall = next(event for event in events if event.event_type == "volume_stall_up")
+        self.assertEqual(stall.direction, "bearish")
+        self.assertGreater(stall.price_change_pct, 0)
+        self.assertGreaterEqual(stall.volume_percentile_20, 0.80)
+        self.assertLessEqual(stall.abs_price_change_percentile_20, 0.20)
+        self.assertEqual(stall.lookback_bars, 20)
+
+    def test_long_wick_pattern_requires_meaningful_body_return(self) -> None:
+        rows = []
+        start = dt.datetime(2026, 1, 1)
+        for index in range(22):
+            close = 100.0 + index
+            rows.append(
+                {
+                    "timestamp": start + dt.timedelta(days=index),
+                    "open": close - 0.5,
+                    "high": close + 0.5,
+                    "low": close - 1.0,
+                    "close": close,
+                    "volume": 100.0 + index,
+                }
+            )
+        previous_close = float(rows[-1]["close"])
+        rows.append(
+            {
+                "timestamp": start + dt.timedelta(days=22),
+                "open": previous_close,
+                "high": previous_close + 4.0,
+                "low": previous_close - 0.5,
+                "close": previous_close * 1.001,
+                "volume": 1_000.0,
+            }
+        )
+
+        events = detect_pattern_events_for_latest_bar(
+            pd.DataFrame(rows),
+            symbol="AAPL",
+            timeframe="1d",
+        )
+
+        self.assertNotIn("volume_long_upper_wick", {event.event_type for event in events})
+
+    def test_long_wick_pattern_requires_atr_scaled_wick_size(self) -> None:
+        rows = []
+        start = dt.datetime(2026, 1, 1)
+        for index in range(22):
+            close = 100.0
+            rows.append(
+                {
+                    "timestamp": start + dt.timedelta(days=index),
+                    "open": close - 5.0,
+                    "high": close + 5.0,
+                    "low": close - 5.0,
+                    "close": close,
+                    "volume": 100.0 + index,
+                }
+            )
+        previous_close = float(rows[-1]["close"])
+        rows.append(
+            {
+                "timestamp": start + dt.timedelta(days=22),
+                "open": previous_close,
+                "high": previous_close + 1.0,
+                "low": previous_close - 0.6,
+                "close": previous_close + 0.4,
+                "volume": 1_000.0,
+            }
+        )
+
+        events = detect_pattern_events_for_latest_bar(
+            pd.DataFrame(rows),
+            symbol="AAPL",
+            timeframe="1d",
+        )
+
+        self.assertNotIn("volume_long_upper_wick", {event.event_type for event in events})
+
+    def test_warmup_records_macd_divergence_events(self) -> None:
+        close_values = [
+            100, 101, 102, 103, 104, 105, 106, 107, 108, 109,
+            110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+            120, 121, 122, 123, 124, 125, 126, 127, 128, 129,
+            130, 129, 128, 127, 126, 125, 124, 123, 122, 121,
+            120, 121, 122, 123, 124, 125, 126, 127, 128, 129,
+            130, 131, 130, 129, 128,
+        ]
+        start = dt.datetime(2026, 1, 1)
+        prices = pd.DataFrame(
+            [
+                {
+                    "date": start + dt.timedelta(days=index),
+                    "open": float(close),
+                    "high": float(close) + 0.5,
+                    "low": float(close) - 0.5,
+                    "close": float(close),
+                    "volume": 1000.0,
+                }
+                for index, close in enumerate(close_values)
+            ]
+        )
+
+        with self.Session() as session:
+            result = ensure_symbol_lifecycle_ready(
+                session,
+                symbol="AAPL",
+                price_df=prices,
+                zone_provider=lambda history, bar: [],
+                lookback_years=0,
+                snapshot_start_date=start,
+                snapshot_end_date=start + dt.timedelta(days=len(close_values) - 1),
+                as_of_date=start + dt.timedelta(days=len(close_values) - 1),
+                force=True,
+            )
+            events = session.scalars(select(DivergenceEvent).order_by(DivergenceEvent.timestamp)).all()
+
+        event_types = {event.event_type for event in events}
+        self.assertIn("macd_bearish_divergence", event_types)
+        self.assertNotIn("macd_bearish_divergence_risk", event_types)
+        bearish = next(event for event in events if event.event_type == "macd_bearish_divergence")
+        self.assertEqual(bearish.event_name, "顶背离")
+        self.assertEqual(bearish.direction, "bearish")
+        self.assertEqual(bearish.source, "macd_divergence")
+        self.assertGreater(bearish.metadata_json["current_price"], bearish.metadata_json["previous_price"])
+        self.assertLessEqual(bearish.metadata_json["current_dif"], bearish.metadata_json["previous_dif"])
+        self.assertFalse(bearish.metadata_json["is_risk"])
+        self.assertGreaterEqual(result.divergence_events, len(events))
+
+    def test_bearish_divergence_requires_current_absolute_high_since_prior_swing(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {"timestamp": dt.datetime(2026, 1, 1), "high": 100.0, "low": 95.0, "dif": 1.0, "dea": 0.8, "histogram": 0.2},
+                {"timestamp": dt.datetime(2026, 1, 2), "high": 105.0, "low": 96.0, "dif": 1.8, "dea": 1.0, "histogram": 0.8},
+                {"timestamp": dt.datetime(2026, 1, 3), "high": 108.0, "low": 97.0, "dif": 2.0, "dea": 1.2, "histogram": 0.8},
+                {"timestamp": dt.datetime(2026, 1, 4), "high": 107.0, "low": 98.0, "dif": 1.6, "dea": 1.1, "histogram": 0.5},
+                {"timestamp": dt.datetime(2026, 1, 5), "high": 106.0, "low": 99.0, "dif": 1.5, "dea": 1.0, "histogram": 0.5},
+            ]
+        )
+
+        events = _build_divergence_event(
+            frame,
+            symbol="AAPL",
+            timeframe="1d",
+            side="high",
+            price_column="high",
+            event_type="macd_bearish_divergence",
+            event_name="顶背离",
+            direction="bearish",
+            previous_idx=1,
+            current_idx=4,
+            left_bars=1,
+            right_bars=0,
+            min_bar_distance=1,
+        )
+
+        self.assertEqual(events, [])
+
+    def test_bullish_divergence_requires_current_absolute_low_since_prior_swing(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {"timestamp": dt.datetime(2026, 1, 1), "high": 110.0, "low": 100.0, "dif": -1.0, "dea": -0.8, "histogram": -0.2},
+                {"timestamp": dt.datetime(2026, 1, 2), "high": 109.0, "low": 95.0, "dif": -1.8, "dea": -1.0, "histogram": -0.8},
+                {"timestamp": dt.datetime(2026, 1, 3), "high": 108.0, "low": 92.0, "dif": -2.0, "dea": -1.2, "histogram": -0.8},
+                {"timestamp": dt.datetime(2026, 1, 4), "high": 107.0, "low": 93.0, "dif": -1.6, "dea": -1.1, "histogram": -0.5},
+                {"timestamp": dt.datetime(2026, 1, 5), "high": 106.0, "low": 94.0, "dif": -1.5, "dea": -1.0, "histogram": -0.5},
+            ]
+        )
+
+        events = _build_divergence_event(
+            frame,
+            symbol="AAPL",
+            timeframe="1d",
+            side="low",
+            price_column="low",
+            event_type="macd_bullish_divergence",
+            event_name="底背离",
+            direction="bullish",
+            previous_idx=1,
+            current_idx=4,
+            left_bars=1,
+            right_bars=0,
+            min_bar_distance=1,
+        )
+
+        self.assertEqual(events, [])
+
+    def test_divergence_query_prefers_confirmed_over_risk_for_same_bar(self) -> None:
+        event_time = dt.datetime(2026, 2, 1)
+        events = [
+            {
+                "event_id": "risk",
+                "event_time": event_time,
+                "event_type": "macd_bullish_divergence_risk",
+                "event_name": "底背离风险",
+                "direction": "bullish",
+                "source": "macd_divergence",
+            },
+            {
+                "event_id": "confirmed",
+                "event_time": event_time,
+                "event_type": "macd_bullish_divergence",
+                "event_name": "底背离",
+                "direction": "bullish",
+                "source": "macd_divergence",
+            },
+            {
+                "event_id": "other-risk",
+                "event_time": event_time + dt.timedelta(days=1),
+                "event_type": "macd_bullish_divergence_risk",
+                "event_name": "底背离风险",
+                "direction": "bullish",
+                "source": "macd_divergence",
+            },
+        ]
+
+        filtered = _prefer_confirmed_over_risk(events)
+
+        self.assertEqual(
+            [event["event_id"] for event in filtered],
+            ["confirmed", "other-risk"],
+        )
 
     def test_warmup_snapshots_only_selected_active_zones(self) -> None:
         prices = pd.DataFrame(
@@ -1361,25 +1610,12 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
                         "lower": 98.0,
                         "upper": 100.0,
                         "center": 99.0,
-                        "timeframes": {"D"},
-                        "source_types": {"swing_low"},
-                        "primary_timeframe": "D",
+                        "timeframes": {"W"},
+                        "source_types": {"swing_w"},
+                        "primary_timeframe": "W",
                         "zone_kind": ZoneKind.EVENT,
                         "origin_bar": dt.datetime(2026, 1, 2),
                         "origin_event_id": "selected-zone",
-                    },
-                    {
-                        "type": "selected_weekly_confluence",
-                        "side": ZoneRole.RESISTANCE,
-                        "lower": 108.0,
-                        "upper": 110.0,
-                        "center": 109.0,
-                        "timeframes": {"D", "W"},
-                        "source_types": {"avwap_d_event", "avwap_w_event"},
-                        "primary_timeframe": "W",
-                        "zone_kind": ZoneKind.COMPOSITE,
-                        "origin_bar": dt.datetime(2026, 1, 2),
-                        "origin_event_id": "selected-weekly-confluence",
                     },
                     {
                         "type": "selected_weekly_avwap",
@@ -1395,7 +1631,7 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
                         "origin_event_id": "selected-weekly-only",
                     },
                     {
-                        "type": "selected_short_vp",
+                        "type": "selected_deprecated_vp",
                         "side": ZoneRole.SUPPORT,
                         "lower": 96.0,
                         "upper": 98.0,
@@ -1427,10 +1663,285 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
 
         self.assertEqual(
             sorted(row.origin_event_id for row in snapshot_rows),
-            ["selected-vp-short", "selected-weekly-confluence", "selected-weekly-only", "selected-zone"],
+            ["selected-zone"],
         )
         self.assertNotIn(active_zone.zone_id, [row.zone_id for row in snapshot_rows])
         self.assertNotIn(invalidated_zone.zone_id, [row.zone_id for row in snapshot_rows])
+
+    def test_replay_snapshot_query_filters_deprecated_zone_sources(self) -> None:
+        with self.Session() as session:
+            swing_zone = upsert_zone(
+                session,
+                symbol="AAPL",
+                timeframe="W",
+                zone_kind=ZoneKind.EVENT,
+                source=["swing_w"],
+                price_low=100.0,
+                price_high=102.0,
+                current_role=ZoneRole.SUPPORT,
+                origin_event_id="weekly-swing-low",
+            )
+            long_vp = upsert_zone(
+                session,
+                symbol="AAPL",
+                timeframe="long",
+                zone_kind=ZoneKind.VP,
+                source=["vp_long"],
+                price_low=103.0,
+                price_high=104.0,
+                current_role=ZoneRole.RESISTANCE,
+                vp_window_type="long_63d",
+            )
+            deprecated_vp = upsert_zone(
+                session,
+                symbol="AAPL",
+                timeframe="short",
+                zone_kind=ZoneKind.VP,
+                source=["vp_short"],
+                price_low=98.0,
+                price_high=99.0,
+                current_role=ZoneRole.SUPPORT,
+                vp_window_type="short_21d",
+            )
+            daily_event = upsert_zone(
+                session,
+                symbol="AAPL",
+                timeframe="D",
+                zone_kind=ZoneKind.AVWAP,
+                source=["avwap_d_event"],
+                price_low=104.0,
+                price_high=105.0,
+                current_role=ZoneRole.RESISTANCE,
+                origin_event_id="daily-event",
+            )
+            for zone in [swing_zone, long_vp, deprecated_vp, daily_event]:
+                record_zone_snapshot(
+                    session,
+                    ZoneSnapshotInput(
+                        zone_id=zone.zone_id,
+                        snapshot_ts=dt.datetime(2026, 1, 2),
+                        current_price=101.0,
+                        atr=3.0,
+                    ),
+                )
+
+            result = load_replay_zone_snapshots(
+                session,
+                symbol="AAPL",
+                replay_date=dt.datetime(2026, 1, 2),
+            )
+
+        self.assertEqual([zone["zone_id"] for zone in result.all_zones], [swing_zone.zone_id])
+
+    def test_zone_strength_is_persisted_to_zone_and_snapshot(self) -> None:
+        with self.Session() as session:
+            zone = upsert_zone(
+                session,
+                symbol="AAPL",
+                timeframe="W",
+                zone_kind=ZoneKind.EVENT,
+                source=["swing_w"],
+                price_low=100.0,
+                price_high=102.0,
+                current_role=ZoneRole.SUPPORT,
+                origin_event_id="weekly-swing",
+                zone_strength_pct=12.5,
+            )
+            snapshot = record_zone_snapshot(
+                session,
+                ZoneSnapshotInput(
+                    zone_id=zone.zone_id,
+                    snapshot_ts=dt.datetime(2026, 1, 2),
+                    current_price=101.0,
+                    atr=3.0,
+                ),
+            )
+
+        self.assertEqual(zone.zone_strength_pct, 12.5)
+        self.assertEqual(snapshot.zone_strength_pct, 12.5)
+
+    def test_replay_snapshot_query_returns_all_active_zones(self) -> None:
+        with self.Session() as session:
+            zones = []
+            for index, center in enumerate([96.0, 98.0, 104.0, 106.0], start=1):
+                role = ZoneRole.SUPPORT if center < 100.0 else ZoneRole.RESISTANCE
+                zone = upsert_zone(
+                    session,
+                    symbol="AAPL",
+                    timeframe="W",
+                    zone_kind=ZoneKind.EVENT,
+                    source=["swing_w"],
+                    price_low=center - 0.5,
+                    price_high=center + 0.5,
+                    current_role=role,
+                    origin_event_id=f"weekly-swing-{index}",
+                )
+                zones.append(zone)
+                record_zone_snapshot(
+                    session,
+                    ZoneSnapshotInput(
+                        zone_id=zone.zone_id,
+                        snapshot_ts=dt.datetime(2026, 1, 2),
+                        current_price=100.0,
+                        atr=3.0,
+                    ),
+                )
+            zones[0].status = ZoneStatus.EXPIRED
+            record_zone_snapshot(
+                session,
+                ZoneSnapshotInput(
+                    zone_id=zones[0].zone_id,
+                    snapshot_ts=dt.datetime(2026, 1, 2),
+                    current_price=100.0,
+                    atr=3.0,
+                ),
+            )
+
+            result = load_replay_zone_snapshots(
+                session,
+                symbol="AAPL",
+                replay_date=dt.datetime(2026, 1, 2),
+            )
+
+        self.assertEqual(len(result.support_zones), 1)
+        self.assertEqual(len(result.resistance_zones), 2)
+        self.assertNotIn(zones[0].zone_id, [zone["zone_id"] for zone in result.all_zones])
+
+    def test_replay_snapshot_query_filters_weekly_swing_expired_at_snapshot_time(self) -> None:
+        with self.Session() as session:
+            zone = upsert_zone(
+                session,
+                symbol="AAPL",
+                timeframe="W",
+                zone_kind=ZoneKind.EVENT,
+                source=["swing_w"],
+                price_low=90.0,
+                price_high=91.0,
+                current_role=ZoneRole.SUPPORT,
+                origin_bar=dt.datetime(2025, 6, 1),
+                origin_event_id="old-weekly-swing",
+            )
+            record_zone_snapshot(
+                session,
+                ZoneSnapshotInput(
+                    zone_id=zone.zone_id,
+                    snapshot_ts=dt.datetime(2026, 1, 3),
+                    current_price=100.0,
+                    atr=3.0,
+                ),
+            )
+
+            result = load_replay_zone_snapshots(
+                session,
+                symbol="AAPL",
+                replay_date=dt.datetime(2026, 1, 3),
+            )
+
+        self.assertEqual(result.all_zones, [])
+
+    def test_warmup_expires_old_weekly_swing_before_snapshot(self) -> None:
+        prices = pd.DataFrame(
+            [
+                {
+                    "date": dt.datetime(2026, 1, 3),
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.0,
+                    "volume": 1_000.0,
+                }
+            ]
+        )
+
+        def old_swing_provider(history, bar):
+            del history, bar
+            return [
+                {
+                    "type": "weekly_swing_support",
+                    "side": ZoneRole.SUPPORT,
+                    "lower": 90.0,
+                    "upper": 91.0,
+                    "center": 90.5,
+                    "timeframes": {"W"},
+                    "source_types": {"swing_w"},
+                    "primary_timeframe": "W",
+                    "zone_kind": ZoneKind.EVENT,
+                    "origin_bar": dt.datetime(2025, 6, 1),
+                    "origin_event_id": "old-weekly-swing",
+                    "origin_event_type": "swing",
+                }
+            ]
+
+        with self.Session() as session:
+            ensure_symbol_lifecycle_ready(
+                session,
+                symbol="AAPL",
+                price_df=prices,
+                zone_provider=old_swing_provider,
+                snapshot_start_date=dt.datetime(2026, 1, 3),
+                snapshot_end_date=dt.datetime(2026, 1, 3),
+                force=True,
+            )
+            zone = session.scalars(select(Zone)).one()
+            snapshot_count = session.scalar(select(func.count()).select_from(ZoneDailySnapshot))
+
+        self.assertEqual(zone.status, ZoneStatus.EXPIRED)
+        self.assertEqual(snapshot_count, 0)
+
+    def test_warmup_snapshots_active_weekly_swing_even_when_not_reselected(self) -> None:
+        prices = pd.DataFrame(
+            [
+                {
+                    "date": dt.datetime(2026, 3, 19) + dt.timedelta(days=index),
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.0,
+                    "volume": 1_000.0,
+                }
+                for index in range(2)
+            ]
+        )
+
+        def first_day_only_provider(history, bar):
+            del history
+            if pd.Timestamp(bar.timestamp).date() != dt.date(2026, 3, 19):
+                return []
+            return [
+                {
+                    "type": "weekly_swing_support",
+                    "side": ZoneRole.SUPPORT,
+                    "lower": 90.0,
+                    "upper": 91.0,
+                    "center": 90.5,
+                    "timeframes": {"W"},
+                    "source_types": {"swing_w"},
+                    "primary_timeframe": "W",
+                    "zone_kind": ZoneKind.EVENT,
+                    "origin_bar": dt.datetime(2026, 3, 6),
+                    "origin_event_id": "weekly-swing-low",
+                    "origin_event_type": "swing",
+                }
+            ]
+
+        with self.Session() as session:
+            ensure_symbol_lifecycle_ready(
+                session,
+                symbol="AAPL",
+                price_df=prices,
+                zone_provider=first_day_only_provider,
+                snapshot_start_date=dt.datetime(2026, 3, 19),
+                snapshot_end_date=dt.datetime(2026, 3, 20),
+                force=True,
+            )
+            snapshots = session.scalars(
+                select(ZoneDailySnapshot).order_by(ZoneDailySnapshot.snapshot_ts)
+            ).all()
+
+        self.assertEqual([snapshot.snapshot_ts for snapshot in snapshots], [
+            dt.datetime(2026, 3, 19),
+            dt.datetime(2026, 3, 20),
+        ])
 
     def test_preloaded_interval_loader_slices_local_frames(self) -> None:
         prices = self._zone_generation_prices()
@@ -1451,18 +1962,11 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
             symbol="AAPL",
             provider="unused-provider",
             config=ZoneGenerationConfig(
-                vp_lookback_days=21,
-                vp_bins=20,
-                weekly_vp_lookback=63,
-                weekly_vp_bins=10,
+                long_vp_lookback_days=63,
+                long_vp_bins=10,
                 zone_expand_pct=0.001,
-                hv_node_quantile=0.8,
-                merge_pct=0.002,
                 max_resistance_zones=4,
                 max_support_zones=4,
-                reaction_lookahead=3,
-                reaction_return_threshold=0.01,
-                min_touch_gap=2,
             ),
             interval_frames={"5m": prices, "1d": prices},
             include_all_candidates=True,
@@ -1472,85 +1976,6 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
 
         self.assertGreater(len(zones), 0)
         self.assertTrue(all("zone_id" in zone for zone in zones))
-
-    def _build_composite_dashboard_zone(self) -> dict:
-        return merge_close_zones(
-            self._source_component_zones(),
-            merge_pct=0.10,
-            symbol="AAPL",
-        )[0]
-
-    def _source_component_zones(self) -> list[dict]:
-        avwap_id = "zone_component_avwap"
-        vp_id = "zone_component_vp"
-        return [
-            {
-                "zone_id": avwap_id,
-                "zone_kind": ZoneKind.AVWAP,
-                "type": "avwap_support_short",
-                "side": "support",
-                "lower": 98.0,
-                "upper": 100.0,
-                "center": 99.0,
-                "vp_volume": 0.0,
-                "anchor_count": 1,
-                "avwap_strength": 1.0,
-                "timeframes": {"short"},
-                "source_types": {"avwap_short_rolling"},
-                "source_label": "AVWAP (short, rolling)",
-                "source_zone_ids": [avwap_id],
-                "source_components": [
-                    {
-                        "zone_id": avwap_id,
-                        "zone_kind": ZoneKind.AVWAP,
-                        "type": "avwap_support_short",
-                        "side": "support",
-                        "lower": 98.0,
-                        "upper": 100.0,
-                        "center": 99.0,
-                        "timeframes": {"short"},
-                        "source_types": {"avwap_short_rolling"},
-                        "source_label": "AVWAP (short, rolling)",
-                        "primary_timeframe": "short",
-                    }
-                ],
-                "primary_timeframe": "short",
-            },
-            {
-                "zone_id": vp_id,
-                "zone_kind": ZoneKind.VP,
-                "type": "vp_zone_short",
-                "side": "support",
-                "lower": 99.0,
-                "upper": 101.0,
-                "center": 100.0,
-                "vp_volume": 1000.0,
-                "anchor_count": 0,
-                "avwap_strength": 0.0,
-                "timeframes": {"short"},
-                "source_types": {"vp_short"},
-                "source_label": "VP (short 21 trading days, 5m)",
-                "vp_window_type": "short_21d",
-                "source_zone_ids": [vp_id],
-                "source_components": [
-                    {
-                        "zone_id": vp_id,
-                        "zone_kind": ZoneKind.VP,
-                        "type": "vp_zone_short",
-                        "side": "support",
-                        "lower": 99.0,
-                        "upper": 101.0,
-                        "center": 100.0,
-                        "timeframes": {"short"},
-                        "source_types": {"vp_short"},
-                        "source_label": "VP (short 21 trading days, 5m)",
-                        "vp_window_type": "short_21d",
-                        "primary_timeframe": "short",
-                    }
-                ],
-                "primary_timeframe": "short",
-            },
-        ]
 
     def _warmup_prices(self) -> pd.DataFrame:
         return pd.DataFrame(
@@ -1572,10 +1997,10 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
                 "lower": 101.0,
                 "upper": 102.0,
                 "center": 101.5,
-                "timeframes": {"1d"},
-                "source_types": {"swing_high"},
+                "timeframes": {"W"},
+                "source_types": {"swing_w"},
                 "source_label": "Swing high",
-                "primary_timeframe": "1d",
+                "primary_timeframe": "W",
                 "origin_bar": dt.datetime(2026, 1, 1),
                 "origin_event_id": "warmup-swing-high",
                 "origin_event_type": "swing_high",
@@ -1585,8 +2010,10 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
     def _zone_generation_prices(self) -> pd.DataFrame:
         rows: list[dict] = []
         start = dt.datetime(2025, 10, 1)
+        weekly_levels = [100, 105, 101, 108, 102, 111, 104, 109, 101, 106, 99, 104]
         for index in range(80):
-            base = 100.0 + index * 0.1
+            week_index = min(index // 7, len(weekly_levels) - 1)
+            base = float(weekly_levels[week_index]) + (index % 7) * 0.05
             rows.append(
                 {
                     "date": start + dt.timedelta(days=index),
@@ -1602,3 +2029,4 @@ class ZoneLifecyclePhaseOneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
