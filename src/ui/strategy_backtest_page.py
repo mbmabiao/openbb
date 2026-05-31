@@ -1,0 +1,329 @@
+from __future__ import annotations
+
+from datetime import date, timedelta
+from typing import Any
+
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+from backtesting.runner import run_backtest
+from strategies.registry import list_strategies
+
+
+TIMEFRAME_OPTIONS = ["1d", "1h", "30m", "15m", "5m"]
+
+
+def render_strategy_backtest_page(default_symbol: str = "MSFT") -> None:
+    st.subheader("Strategy Backtest")
+
+    strategies = list_strategies()
+    if not strategies:
+        st.warning("No strategies discovered in src/strategies.")
+        return
+
+    strategy_by_label = {
+        f"{item['display_name']} ({item['name']})": item
+        for item in strategies
+    }
+
+    env_col, strategy_col = st.columns([1, 1], gap="large")
+    with env_col:
+        st.markdown("#### Backtest Environment")
+        symbol = st.text_input("Symbol", value=default_symbol, key="bt_symbol").strip().upper()
+        selected_label = st.selectbox(
+            "Strategy",
+            options=list(strategy_by_label),
+            key="bt_strategy",
+            on_change=_reset_strategy_state,
+        )
+        metadata = strategy_by_label[selected_label]
+        required_timeframes = list(metadata.get("required_timeframes") or ["1d"])
+        primary_default = required_timeframes[0] if required_timeframes else "1d"
+        timeframe_options = _ordered_unique([primary_default, *required_timeframes, *TIMEFRAME_OPTIONS])
+        primary_timeframe = st.selectbox(
+            "Primary timeframe",
+            options=timeframe_options,
+            index=timeframe_options.index(primary_default),
+            key=f"bt_primary_{metadata['name']}",
+        )
+        today = date.today()
+        start_date = st.date_input("Backtest start date", value=today - timedelta(days=365), key="bt_start")
+        end_date = st.date_input("Backtest end date", value=today, key="bt_end")
+        price_provider = st.text_input("Price provider", value="yfinance", key="bt_provider").strip() or None
+
+        st.markdown("#### Execution Settings")
+        initial_capital = st.number_input("Initial capital", min_value=1.0, value=10_000.0, step=1_000.0)
+        slippage_pct = st.number_input("Slippage (%)", min_value=0.0, value=0.05, step=0.01, format="%.4f")
+        commission_pct = st.number_input("Commission per trade (%)", min_value=0.0, value=0.05, step=0.01, format="%.4f")
+        position_size_pct = st.number_input("Position size (%)", min_value=0.0, max_value=100.0, value=100.0, step=5.0)
+        allow_long = st.checkbox("Allow long", value=True)
+        allow_short = st.checkbox("Allow short", value=True)
+        exit_before_entry = st.checkbox("Exit before entry on same bar", value=True)
+
+    with strategy_col:
+        st.markdown("#### Strategy Settings")
+        st.caption(metadata.get("description") or "")
+        st.caption(f"Required timeframes: {', '.join(required_timeframes)}")
+        strategy_config = _render_strategy_config(metadata)
+
+    run_clicked = st.button("Run Backtest", type="primary", use_container_width=True)
+
+    if run_clicked:
+        if not symbol:
+            st.error("Symbol is required.")
+            return
+        if start_date > end_date:
+            st.error("Backtest start date must be before end date.")
+            return
+        required_missing = _missing_required_fields(metadata, strategy_config)
+        if required_missing:
+            st.error(f"Required strategy fields are missing: {', '.join(required_missing)}")
+            return
+
+        backtest_config = {
+            "initial_capital": float(initial_capital),
+            "slippage": float(slippage_pct) / 100.0,
+            "commission_pct": float(commission_pct) / 100.0,
+            "position_size_pct": float(position_size_pct) / 100.0,
+            "allow_short": bool(allow_short),
+            "allow_long": bool(allow_long),
+            "exit_before_entry": bool(exit_before_entry),
+            "price_col": "close",
+            "primary_timeframe": primary_timeframe,
+            "start_date": str(start_date),
+            "end_date": str(end_date),
+            "price_provider": price_provider,
+        }
+        with st.spinner("Running strategy backtest..."):
+            try:
+                result = run_backtest(
+                    symbol=symbol,
+                    strategy_name=metadata["name"],
+                    strategy_config=strategy_config,
+                    backtest_config=backtest_config,
+                )
+            except Exception as exc:
+                st.error(f"Backtest failed: {exc}")
+                return
+        _render_results(result)
+
+
+def _render_strategy_config(metadata: dict) -> dict:
+    default_config = dict(metadata.get("default_config") or {})
+    schema = dict(metadata.get("config_schema") or {})
+    if not schema:
+        schema = _infer_schema(default_config)
+
+    config: dict[str, Any] = {}
+    for field_name, spec in schema.items():
+        field_type = str(spec.get("type", "str")).lower()
+        label = str(spec.get("label") or field_name)
+        help_text = spec.get("help")
+        default = spec.get("default", default_config.get(field_name))
+        key = f"strategy_{metadata['name']}_{field_name}"
+
+        if field_type == "int":
+            config[field_name] = int(
+                st.number_input(
+                    label,
+                    value=int(default or 0),
+                    min_value=spec.get("min"),
+                    max_value=spec.get("max"),
+                    step=int(spec.get("step", 1)),
+                    help=help_text,
+                    key=key,
+                )
+            )
+        elif field_type == "float":
+            config[field_name] = float(
+                st.number_input(
+                    label,
+                    value=float(default or 0.0),
+                    min_value=spec.get("min"),
+                    max_value=spec.get("max"),
+                    step=float(spec.get("step", 0.1)),
+                    help=help_text,
+                    key=key,
+                )
+            )
+        elif field_type == "bool":
+            config[field_name] = bool(st.checkbox(label, value=bool(default), help=help_text, key=key))
+        elif field_type == "select":
+            options = list(spec.get("options") or [])
+            selected = default if default in options else (options[0] if options else "")
+            config[field_name] = st.selectbox(
+                label,
+                options=options,
+                index=options.index(selected) if selected in options else 0,
+                help=help_text,
+                key=key,
+            )
+        else:
+            config[field_name] = st.text_input(label, value="" if default is None else str(default), help=help_text, key=key)
+    return config
+
+
+def _render_results(result) -> None:
+    st.markdown("#### Summary")
+    metrics = result.metrics
+    metric_items = [
+        ("Total return", _format_pct(metrics.get("total_return"))),
+        ("Annualised return", _format_pct(metrics.get("annualised_return"))),
+        ("Max drawdown", _format_pct(metrics.get("max_drawdown"))),
+        ("Sharpe", _format_number(metrics.get("sharpe_ratio"))),
+        ("Win rate", _format_pct(metrics.get("win_rate"))),
+        ("P/L ratio", _format_number(metrics.get("profit_loss_ratio"))),
+        ("Trade count", str(metrics.get("trade_count", 0))),
+        ("Final equity", _format_currency(metrics.get("final_equity"))),
+    ]
+    columns = st.columns(4)
+    for idx, (label, value) in enumerate(metric_items):
+        columns[idx % 4].metric(label, value)
+
+    chart_col, equity_col = st.columns([1.45, 1], gap="large")
+    with chart_col:
+        st.markdown("#### Executed Trades")
+        st.plotly_chart(_build_price_chart(result), use_container_width=True)
+    with equity_col:
+        st.markdown("#### Equity Curve")
+        st.plotly_chart(_build_equity_chart(result), use_container_width=True)
+
+    st.markdown("#### Trade Details")
+    st.dataframe(_trades_to_frame(result.trades), use_container_width=True, hide_index=True)
+
+
+def _build_price_chart(result) -> go.Figure:
+    df = result.signals
+    fig = go.Figure()
+    fig.add_trace(
+        go.Candlestick(
+            x=df["date"],
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            name="OHLC",
+            increasing_line_color="#38d5b5",
+            decreasing_line_color="#fb7185",
+        )
+    )
+    for column in [column for column in df.columns if column.startswith("plot_")]:
+        overlay = df.loc[:, ["date", column]].dropna()
+        if overlay.empty:
+            continue
+        fig.add_trace(go.Scatter(x=overlay["date"], y=overlay[column], mode="lines", name=column.replace("plot_", "")))
+
+    for trade in result.trades:
+        entry_color = "#38d5b5" if trade.type == "LONG" else "#fb7185"
+        fig.add_trace(
+            go.Scatter(
+                x=[trade.entry_time],
+                y=[trade.entry_price],
+                mode="markers",
+                marker={"symbol": "triangle-up", "size": 12, "color": entry_color},
+                name=f"{trade.type} entry",
+                showlegend=False,
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=[trade.exit_time],
+                y=[trade.exit_price],
+                mode="markers",
+                marker={"symbol": "x", "size": 11, "color": "#ffffff"},
+                name=f"{trade.type} exit",
+                showlegend=False,
+            )
+        )
+    fig.update_layout(template="plotly_dark", height=560, margin={"l": 10, "r": 10, "t": 20, "b": 10})
+    fig.update_xaxes(rangeslider_visible=False)
+    return fig
+
+
+def _build_equity_chart(result) -> go.Figure:
+    df = pd.DataFrame([point.__dict__ for point in result.equity_curve])
+    fig = go.Figure()
+    if not df.empty:
+        fig.add_trace(go.Scatter(x=df["time"], y=df["equity"], mode="lines", name="Equity", line={"color": "#38d5b5"}))
+    fig.update_layout(template="plotly_dark", height=560, margin={"l": 10, "r": 10, "t": 20, "b": 10})
+    return fig
+
+
+def _trades_to_frame(trades: list) -> pd.DataFrame:
+    rows = [
+        {
+            "No.": trade.index,
+            "Type": trade.type,
+            "Exit reason": trade.exit_reason,
+            "Entry time": trade.entry_time,
+            "Exit time": trade.exit_time,
+            "Entry price": trade.entry_price,
+            "Exit price": trade.exit_price,
+            "PnL": trade.pnl,
+            "Balance": trade.balance,
+            "Bars held": trade.bars_held,
+            "Size source": trade.size_source,
+        }
+        for trade in trades
+    ]
+    return pd.DataFrame(rows)
+
+
+def _infer_schema(default_config: dict) -> dict:
+    schema: dict[str, dict] = {}
+    for key, value in default_config.items():
+        if isinstance(value, bool):
+            field_type = "bool"
+        elif isinstance(value, int):
+            field_type = "int"
+        elif isinstance(value, float):
+            field_type = "float"
+        else:
+            field_type = "str"
+        schema[key] = {"type": field_type, "label": key.replace("_", " ").title(), "default": value}
+    return schema
+
+
+def _missing_required_fields(metadata: dict, config: dict) -> list[str]:
+    schema = dict(metadata.get("config_schema") or {})
+    missing: list[str] = []
+    for field_name, spec in schema.items():
+        if not spec.get("required"):
+            continue
+        value = config.get(field_name)
+        if value is None or value == "":
+            missing.append(field_name)
+    return missing
+
+
+def _reset_strategy_state() -> None:
+    for key in list(st.session_state):
+        if str(key).startswith("strategy_") or str(key).startswith("bt_primary_"):
+            del st.session_state[key]
+
+
+def _ordered_unique(values: list[str]) -> list[str]:
+    output: list[str] = []
+    for value in values:
+        if value not in output:
+            output.append(value)
+    return output
+
+
+def _format_pct(value: Any) -> str:
+    if value is None:
+        return "N/A"
+    return f"{float(value) * 100:.2f}%"
+
+
+def _format_number(value: Any) -> str:
+    if value is None:
+        return "N/A"
+    return f"{float(value):.2f}"
+
+
+def _format_currency(value: Any) -> str:
+    if value is None:
+        return "N/A"
+    return f"${float(value):,.2f}"

@@ -1292,12 +1292,15 @@ def _market_css() -> str:
     return """
     <style>
     .market-hero {
-        border-bottom: 1px solid rgba(49, 51, 63, 0.14);
-        padding: 0.4rem 0 1rem 0;
-        margin-bottom: 0.2rem;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 8px;
+        padding: 1rem 1.1rem 1.15rem 1.1rem;
+        margin-bottom: 1rem;
+        background: linear-gradient(135deg, rgba(13, 20, 32, 0.96), rgba(10, 16, 26, 0.72));
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.22);
     }
     .market-hero .eyebrow {
-        color: #5f6368;
+        color: #38d5b5;
         font-size: 0.86rem;
         font-weight: 700;
         letter-spacing: 0;
@@ -1307,24 +1310,51 @@ def _market_css() -> str:
         margin: 0.18rem 0 0.25rem 0;
         font-size: 2rem;
         line-height: 1.16;
+        color: #ffffff;
     }
     .market-hero p {
-        color: #4b5563;
+        color: #eaf2fb;
         margin: 0;
         max-width: 980px;
     }
+    .market-hero [data-testid="stMarkdownContainer"],
+    .market-hero [data-testid="stMarkdownContainer"] p {
+        color: #94a3b8;
+    }
+    .market-hero h1,
+    .market-hero [data-testid="stMarkdownContainer"] h1 {
+        color: #e5edf6;
+    }
+    div[data-testid="stMetric"] {
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        background: rgba(13, 20, 32, 0.78);
+        border-radius: 8px;
+        padding: 0.85rem 0.95rem;
+    }
+    div[data-testid="stMetric"] label,
+    div[data-testid="stMetric"] label p {
+        color: #94a3b8;
+    }
+    div[data-testid="stMetricValue"],
+    div[data-testid="stMetricValue"] div {
+        color: #e5edf6;
+    }
+    div[data-testid="stMetricDelta"],
+    div[data-testid="stMetricDelta"] div {
+        color: #38d5b5;
+    }
     .etf-card {
         min-height: 390px;
-        border: 1px solid rgba(49, 51, 63, 0.16);
+        border: 1px solid rgba(148, 163, 184, 0.18);
         border-radius: 8px;
         padding: 14px;
         margin: 0 0 14px 0;
-        background: #ffffff;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+        background: rgba(13, 20, 32, 0.88);
+        box-shadow: 0 16px 44px rgba(0, 0, 0, 0.22);
     }
     .etf-card.unavailable {
-        border-color: rgba(107,114,128,0.28);
-        background: #fafafa;
+        border-color: rgba(148, 163, 184, 0.12);
+        background: rgba(15, 23, 42, 0.52);
     }
     .card-top {
         display: flex;
@@ -1333,19 +1363,19 @@ def _market_css() -> str:
         gap: 8px;
     }
     .ticker {
-        color: #111827;
+        color: #ffffff;
         font-size: 1.28rem;
         font-weight: 800;
         line-height: 1.1;
     }
     .name {
-        color: #6b7280;
+        color: #d7e2ee;
         font-size: 0.78rem;
         line-height: 1.25;
         margin-top: 3px;
     }
     .category {
-        color: #374151;
+        color: #f3f7fb;
         font-size: 0.82rem;
         font-weight: 700;
         line-height: 1.3;
@@ -1360,19 +1390,19 @@ def _market_css() -> str:
         margin: 0 0 10px 0;
     }
     .tag-row span {
-        border: 1px solid rgba(17,24,39,0.10);
+        border: 1px solid rgba(148, 163, 184, 0.16);
         border-radius: 999px;
-        background: #f8fafc;
-        color: #374151;
+        background: rgba(15, 23, 42, 0.74);
+        color: #edf5ff;
         font-size: 0.68rem;
         font-weight: 700;
         line-height: 1.2;
         padding: 4px 7px;
     }
     .diagnosis-panel {
-        border: 1px solid rgba(49, 51, 63, 0.14);
+        border: 1px solid rgba(148, 163, 184, 0.18);
         border-radius: 8px;
-        background: #fbfcfd;
+        background: rgba(8, 13, 22, 0.76);
         padding: 12px 14px;
         margin: 8px 0 16px 0;
     }
@@ -1383,10 +1413,10 @@ def _market_css() -> str:
         margin-bottom: 10px;
     }
     .diagnosis-meta span {
-        border: 1px solid rgba(17,24,39,0.10);
+        border: 1px solid rgba(148, 163, 184, 0.16);
         border-radius: 999px;
-        background: #ffffff;
-        color: #4b5563;
+        background: rgba(13, 20, 32, 0.82);
+        color: #d7e2ee;
         font-size: 0.74rem;
         padding: 4px 8px;
     }
@@ -1400,18 +1430,18 @@ def _market_css() -> str:
     }
     .diagnosis-grid span {
         display: block;
-        color: #6b7280;
+        color: #d7e2ee;
         font-size: 0.72rem;
         font-weight: 700;
         margin-bottom: 4px;
     }
     .diagnosis-grid strong {
-        color: #111827;
+        color: #ffffff;
         font-size: 0.94rem;
         line-height: 1.35;
     }
     .diagnosis-grid p {
-        color: #374151;
+        color: #eef6ff;
         font-size: 0.82rem;
         line-height: 1.42;
         margin: 0;
@@ -1431,22 +1461,22 @@ def _market_css() -> str:
         align-items: baseline;
         justify-content: space-between;
         gap: 8px;
-        border-bottom: 1px solid rgba(49, 51, 63, 0.08);
+        border-bottom: 1px solid rgba(148, 163, 184, 0.12);
         padding-bottom: 5px;
     }
     .metrics span {
-        color: #6b7280;
+        color: #d7e2ee;
         font-size: 0.72rem;
         line-height: 1.25;
     }
     .metrics strong {
-        color: #111827;
+        color: #ffffff;
         font-size: 0.92rem;
         white-space: nowrap;
     }
-    .positive { color: #c2410c !important; }
-    .negative { color: #15803d !important; }
-    .neutral { color: #6b7280 !important; }
+    .positive { color: #38d5b5 !important; }
+    .negative { color: #fb7185 !important; }
+    .neutral { color: #d7e2ee !important; }
     .status-badge {
         border-radius: 999px;
         padding: 3px 8px;
@@ -1455,15 +1485,15 @@ def _market_css() -> str:
         white-space: nowrap;
     }
     .status-ok {
-        background: #eef2ff;
-        color: #3730a3;
+        background: rgba(56, 213, 181, 0.14);
+        color: #8bf5dd;
     }
     .status-bad {
-        background: #f3f4f6;
-        color: #6b7280;
+        background: rgba(148, 163, 184, 0.12);
+        color: #d7e2ee;
     }
     .status-text {
-        color: #6b7280;
+        color: #d7e2ee;
         font-size: 0.8rem;
         font-weight: 800;
         margin: 6px 0 8px 0;
@@ -1477,29 +1507,29 @@ def _market_css() -> str:
         font-weight: 800;
     }
     .trend-strong {
-        background: #fee2e2;
-        color: #b91c1c;
+        background: rgba(56, 213, 181, 0.14);
+        color: #8bf5dd;
     }
     .trend-weak {
-        background: #dcfce7;
-        color: #166534;
+        background: rgba(251, 113, 133, 0.14);
+        color: #fda4af;
     }
     .trend-rebound {
-        background: #fff7ed;
-        color: #c2410c;
+        background: rgba(90, 167, 255, 0.14);
+        color: #93c5fd;
     }
     .trend-pullback {
-        background: #ecfdf5;
-        color: #047857;
+        background: rgba(245, 158, 11, 0.14);
+        color: #fbbf24;
     }
     .static-line {
-        color: #374151;
+        color: #eef6ff;
         font-size: 0.78rem;
         line-height: 1.38;
         margin-top: 8px;
     }
     .updated {
-        color: #9ca3af;
+        color: #c7d4e5;
         font-size: 0.68rem;
         margin-top: 10px;
     }

@@ -1,0 +1,23 @@
+backtest:
+  symbol: MSFT
+  primary_timeframe: 1d
+  start_date: "2025-01-01"
+  end_date: "2026-05-31"
+  initial_capital: 10000
+  slippage: 0.0005
+  commission_pct: 0.0005
+  position_size_pct: 1.0
+  allow_long: true
+  allow_short: true
+  exit_before_entry: true
+  price_col: close
+  price_provider: yfinance
+
+strategy:
+  name: supertrend_atr_trailing
+  config:
+    atr_period: 10
+    supertrend_multiplier: 3.0
+    atr_exit_mult: 1.5
+    exit_on_opposite_signal: true
+    direction: both
