@@ -218,10 +218,18 @@ def _build_price_chart(result) -> go.Figure:
         )
     )
     for column in [column for column in df.columns if column.startswith("plot_")]:
-        overlay = df.loc[:, ["date", column]].dropna()
-        if overlay.empty:
+        overlay = df.loc[:, ["date", column]].copy()
+        if overlay[column].dropna().empty:
             continue
-        fig.add_trace(go.Scatter(x=overlay["date"], y=overlay[column], mode="lines", name=column.replace("plot_", "")))
+        fig.add_trace(
+            go.Scatter(
+                x=overlay["date"],
+                y=overlay[column],
+                mode="lines",
+                name=column.replace("plot_", ""),
+                connectgaps=False,
+            )
+        )
 
     for trade in result.trades:
         entry_color = "#fb7185" if trade.type == "LONG" else "#38d5b5"
