@@ -16,6 +16,7 @@ def run_backtest(
     strategy_config: dict,
     backtest_config: dict,
 ) -> BacktestResult:
+    strategy_config = _sync_strategy_direction_config(strategy_config, backtest_config)
     strategy = get_strategy(strategy_name, strategy_config)
     config = _build_config(backtest_config)
     context = build_strategy_context(
@@ -36,9 +37,30 @@ def run_backtest_from_context(
     strategy_config: dict,
     backtest_config: dict,
 ) -> BacktestResult:
+    strategy_config = _sync_strategy_direction_config(strategy_config, backtest_config)
     strategy = get_strategy(strategy_name, strategy_config)
     config = _build_config(backtest_config)
     return BacktestEngine().run(context, strategy, config)
+
+
+def _sync_strategy_direction_config(strategy_config: dict, backtest_config: dict) -> dict:
+    synced = dict(strategy_config or {})
+    allow_long = bool(backtest_config.get("allow_long", True))
+    allow_short = bool(backtest_config.get("allow_short", True))
+    synced["allow_long"] = allow_long
+    synced["allow_short"] = allow_short
+    synced["trade_direction"] = _trade_direction_from_flags(allow_long=allow_long, allow_short=allow_short)
+    return synced
+
+
+def _trade_direction_from_flags(*, allow_long: bool, allow_short: bool) -> str:
+    if allow_long and allow_short:
+        return "both"
+    if allow_long:
+        return "long"
+    if allow_short:
+        return "short"
+    return "none"
 
 
 def _build_config(raw: dict) -> BacktestConfig:

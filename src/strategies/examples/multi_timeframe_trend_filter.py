@@ -66,7 +66,7 @@ class MultiTimeframeTrendFilterStrategy(BaseStrategy):
             higher_timeframe="1d",
         )
         df = pd.concat([primary, aligned], axis=1)
-        direction = str(cfg["direction"])
+        trade_direction = str(cfg.get("trade_direction", cfg.get("direction", "both"))).lower()
         entry_bars = int(cfg["entry_momentum_bars"])
         exit_bars = int(cfg["exit_momentum_bars"])
 
@@ -75,8 +75,8 @@ class MultiTimeframeTrendFilterStrategy(BaseStrategy):
         up_exit = df["close"].gt(df["close"].shift(1)).rolling(exit_bars, min_periods=exit_bars).sum() == exit_bars
         down_exit = df["close"].lt(df["close"].shift(1)).rolling(exit_bars, min_periods=exit_bars).sum() == exit_bars
 
-        df["open_long"] = (df["daily_trend"] == 1) & up_momentum & (direction in {"long", "both"})
-        df["open_short"] = (df["daily_trend"] == -1) & down_momentum & (direction in {"short", "both"})
+        df["open_long"] = (df["daily_trend"] == 1) & up_momentum & (trade_direction in {"long", "both"})
+        df["open_short"] = (df["daily_trend"] == -1) & down_momentum & (trade_direction in {"short", "both"})
         df["close_long"] = down_exit | (df["daily_trend"] == -1)
         df["close_short"] = up_exit | (df["daily_trend"] == 1)
         df["entry_reason"] = "MTF trend + momentum"

@@ -44,6 +44,7 @@ class BacktestEngine:
             if price is None or price <= 0:
                 continue
 
+            _validate_reversal_signal(row=row, position=position)
             current_equity = _mark_to_market(cash, position, price)
             if config.exit_before_entry:
                 cash, position = self._maybe_exit(row, row_number, price, cash, position, trades, config)
@@ -99,6 +100,7 @@ class BacktestEngine:
             initial_capital=config.initial_capital,
             equity_curve=equity_curve,
             trades=trades,
+            primary_timeframe=context.primary_timeframe,
         )
         return result
 
@@ -232,6 +234,23 @@ def _prepare_signals(signals: pd.DataFrame, price_col: str) -> pd.DataFrame:
         out[column] = out[column].fillna(False).astype(bool)
     out["date"] = pd.to_datetime(out["date"], errors="coerce")
     return out.dropna(subset=["date", price_col]).reset_index(drop=True)
+
+
+def _validate_reversal_signal(row: pd.Series, position: Position | None) -> None:
+    if position is None:
+        return
+    if position.side == "long" and bool(row["open_short"]) and not bool(row["close_long"]):
+        raise ValueError(
+            "Invalid reversal signal: current position is LONG, but strategy emitted "
+            f"open_short=True without close_long=True at {row['date']}. "
+            "Close the long position before opening a short position."
+        )
+    if position.side == "short" and bool(row["open_long"]) and not bool(row["close_short"]):
+        raise ValueError(
+            "Invalid reversal signal: current position is SHORT, but strategy emitted "
+            f"open_long=True without close_short=True at {row['date']}. "
+            "Close the short position before opening a long position."
+        )
 
 
 def _resolve_position_size(row: pd.Series, equity: float, config: BacktestConfig) -> tuple[float, float, str]:

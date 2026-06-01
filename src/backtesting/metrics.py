@@ -13,6 +13,7 @@ def calculate_metrics(
     initial_capital: float,
     equity_curve: list[EquityPoint],
     trades: list[Trade],
+    primary_timeframe: str = "1d",
 ) -> dict[str, float | int | None]:
     final_equity = equity_curve[-1].equity if equity_curve else initial_capital
     total_return = (final_equity / initial_capital) - 1 if initial_capital else 0.0
@@ -22,7 +23,7 @@ def calculate_metrics(
     )
     annualised_return = _annualised_return(equity_df, total_return)
     max_drawdown = _max_drawdown(equity_df)
-    sharpe_ratio = _sharpe_ratio(equity_df)
+    sharpe_ratio = _sharpe_ratio(equity_df, primary_timeframe=primary_timeframe)
 
     wins = [trade.pnl for trade in trades if trade.pnl > 0]
     losses = [trade.pnl for trade in trades if trade.pnl < 0]
@@ -71,12 +72,40 @@ def _max_drawdown(equity_df: pd.DataFrame) -> float:
     return float(drawdown.min())
 
 
-def _sharpe_ratio(equity_df: pd.DataFrame) -> float | None:
+def _sharpe_ratio(equity_df: pd.DataFrame, primary_timeframe: str = "1d") -> float | None:
     if equity_df.empty or len(equity_df) < 3:
         return None
     returns = pd.to_numeric(equity_df["equity"], errors="coerce").pct_change().dropna()
     std = float(returns.std(ddof=1)) if not returns.empty else 0.0
     if not math.isfinite(std) or std == 0.0:
         return None
-    return float((returns.mean() / std) * math.sqrt(252))
+    return float((returns.mean() / std) * _sharpe_annualisation_multiplier(primary_timeframe))
 
+
+def _sharpe_annualisation_multiplier(primary_timeframe: str) -> float:
+    return math.sqrt(_periods_per_year(primary_timeframe))
+
+
+def _periods_per_year(primary_timeframe: str) -> float:
+    normalized = str(primary_timeframe or "1d").strip().lower()
+    if normalized in {"1d", "d", "day", "daily"}:
+        return 252.0
+    if normalized in {"1h", "60m", "60min"}:
+        return 252.0 * 6.5
+    if normalized.endswith("m"):
+        try:
+            minutes = float(normalized[:-1])
+        except ValueError:
+            return 252.0
+        if minutes <= 0:
+            return 252.0
+        return 252.0 * (390.0 / minutes)
+    if normalized.endswith("min"):
+        try:
+            minutes = float(normalized[:-3])
+        except ValueError:
+            return 252.0
+        if minutes <= 0:
+            return 252.0
+        return 252.0 * (390.0 / minutes)
+    return 252.0

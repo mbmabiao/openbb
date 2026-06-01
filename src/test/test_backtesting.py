@@ -3,9 +3,10 @@ from __future__ import annotations
 import pandas as pd
 
 from backtesting.engine import BacktestEngine
+from backtesting.metrics import calculate_metrics
 from backtesting.presenter import format_trade_table
-from backtesting.runner import run_backtest_from_context
-from backtesting.schema import BacktestConfig
+from backtesting.runner import _trade_direction_from_flags, run_backtest_from_context
+from backtesting.schema import BacktestConfig, EquityPoint
 from strategies.base import BaseStrategy, StrategyContext
 from strategies.registry import list_strategies
 
@@ -48,6 +49,36 @@ class ConfigSizingStrategy(BaseStrategy):
         df["close_long"] = False
         df.loc[1, "open_long"] = True
         df.loc[3, "close_long"] = True
+        return df
+
+
+class InvalidLongToShortReversalStrategy(BaseStrategy):
+    name = "invalid_long_to_short_reversal"
+    required_timeframes = ["1d"]
+
+    def generate_signals(self, context: StrategyContext) -> pd.DataFrame:
+        df = context.data["1d"].copy()
+        df["open_long"] = False
+        df["close_long"] = False
+        df["open_short"] = False
+        df["close_short"] = False
+        df.loc[1, "open_long"] = True
+        df.loc[3, "open_short"] = True
+        return df
+
+
+class InvalidShortToLongReversalStrategy(BaseStrategy):
+    name = "invalid_short_to_long_reversal"
+    required_timeframes = ["1d"]
+
+    def generate_signals(self, context: StrategyContext) -> pd.DataFrame:
+        df = context.data["1d"].copy()
+        df["open_long"] = False
+        df["close_long"] = False
+        df["open_short"] = False
+        df["close_short"] = False
+        df.loc[1, "open_short"] = True
+        df.loc[3, "open_long"] = True
         return df
 
 
@@ -114,6 +145,28 @@ def test_format_trade_table_returns_frontend_friendly_rows() -> None:
     assert "Size source" not in rows[0]
 
 
+def test_sharpe_ratio_annualises_by_primary_timeframe() -> None:
+    equity_curve = [
+        EquityPoint(time=pd.Timestamp("2025-01-01 09:30") + pd.Timedelta(minutes=15 * idx), equity=value, cash=value, position_value=0)
+        for idx, value in enumerate([10_000, 10_100, 10_050, 10_250, 10_200])
+    ]
+    daily = calculate_metrics(
+        initial_capital=10_000,
+        equity_curve=equity_curve,
+        trades=[],
+        primary_timeframe="1d",
+    )
+    fifteen_min = calculate_metrics(
+        initial_capital=10_000,
+        equity_curve=equity_curve,
+        trades=[],
+        primary_timeframe="15m",
+    )
+    assert fifteen_min["sharpe_ratio"] is not None
+    assert daily["sharpe_ratio"] is not None
+    assert fifteen_min["sharpe_ratio"] > daily["sharpe_ratio"]
+
+
 def test_missing_signal_columns_are_filled_false() -> None:
     result = BacktestEngine().run(
         _context(_prices()),
@@ -122,6 +175,32 @@ def test_missing_signal_columns_are_filled_false() -> None:
     )
     assert result.trades == []
     assert set(["open_long", "close_long", "open_short", "close_short"]).issubset(result.signals.columns)
+
+
+def test_engine_rejects_open_short_before_closing_long() -> None:
+    try:
+        BacktestEngine().run(
+            _context(_prices()),
+            InvalidLongToShortReversalStrategy(),
+            BacktestConfig(initial_capital=10_000),
+        )
+    except ValueError as exc:
+        assert "open_short=True without close_long=True" in str(exc)
+    else:
+        raise AssertionError("Expected invalid long-to-short reversal to raise ValueError.")
+
+
+def test_engine_rejects_open_long_before_closing_short() -> None:
+    try:
+        BacktestEngine().run(
+            _context(_prices()),
+            InvalidShortToLongReversalStrategy(),
+            BacktestConfig(initial_capital=10_000),
+        )
+    except ValueError as exc:
+        assert "open_long=True without close_short=True" in str(exc)
+    else:
+        raise AssertionError("Expected invalid short-to-long reversal to raise ValueError.")
 
 
 def test_runner_from_context_runs_supertrend_end_to_end() -> None:
@@ -139,6 +218,35 @@ def test_runner_from_context_runs_supertrend_end_to_end() -> None:
     )
     assert "plot_supertrend" in result.signals.columns
     assert result.metrics["trade_count"] >= 0
+
+
+def test_runner_syncs_engine_direction_limits_into_supertrend_config() -> None:
+    result = run_backtest_from_context(
+        context=_context(_trend_prices()),
+        strategy_name="supertrend_atr_trailing",
+        strategy_config={
+            "atr_period": 3,
+            "supertrend_multiplier": 1.0,
+            "atr_exit_mult": 1.0,
+            "exit_on_opposite_signal": True,
+            "direction": "both",
+        },
+        backtest_config={
+            "initial_capital": 10_000,
+            "primary_timeframe": "1d",
+            "allow_long": True,
+            "allow_short": False,
+        },
+    )
+    assert not result.signals["open_short"].any()
+    assert all(trade.type != "SHORT" for trade in result.trades)
+
+
+def test_trade_direction_mapping_from_engine_flags() -> None:
+    assert _trade_direction_from_flags(allow_long=True, allow_short=True) == "both"
+    assert _trade_direction_from_flags(allow_long=True, allow_short=False) == "long"
+    assert _trade_direction_from_flags(allow_long=False, allow_short=True) == "short"
+    assert _trade_direction_from_flags(allow_long=False, allow_short=False) == "none"
 
 
 def test_multi_timeframe_context_can_hold_15m_and_1d() -> None:

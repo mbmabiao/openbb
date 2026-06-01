@@ -9,7 +9,7 @@ import streamlit as st
 
 from backtesting.presenter import format_trade_table
 from backtesting.runner import run_backtest
-from strategies.registry import list_strategies
+from strategies.registry import discover_strategies, list_strategies
 
 
 TIMEFRAME_OPTIONS = ["1d", "1h", "30m", "15m", "5m"]
@@ -32,12 +32,20 @@ def render_strategy_backtest_page(default_symbol: str = "MSFT") -> None:
     with env_col:
         st.markdown("#### Backtest Environment")
         symbol = st.text_input("Symbol", value=default_symbol, key="bt_symbol").strip().upper()
-        selected_label = st.selectbox(
-            "Strategy",
-            options=list(strategy_by_label),
-            key="bt_strategy",
-            on_change=_reset_strategy_state,
-        )
+        strategy_select_col, refresh_col = st.columns([0.78, 0.22], gap="small")
+        with strategy_select_col:
+            selected_label = st.selectbox(
+                "Strategy",
+                options=list(strategy_by_label),
+                key="bt_strategy",
+                on_change=_reset_strategy_state,
+            )
+        with refresh_col:
+            st.markdown("<div style='height: 1.75rem;'></div>", unsafe_allow_html=True)
+            if st.button("Refresh", key="bt_refresh_strategies", use_container_width=True):
+                discover_strategies.cache_clear()
+                _reset_strategy_state()
+                st.rerun()
         metadata = strategy_by_label[selected_label]
         required_timeframes = list(metadata.get("required_timeframes") or ["1d"])
         primary_default = required_timeframes[0] if required_timeframes else "1d"
@@ -118,6 +126,8 @@ def _render_strategy_config(metadata: dict) -> dict:
 
     config: dict[str, Any] = {}
     for field_name, spec in schema.items():
+        if field_name == "direction":
+            continue
         field_type = str(spec.get("type", "str")).lower()
         label = str(spec.get("label") or field_name)
         help_text = spec.get("help")
@@ -289,12 +299,14 @@ def _infer_schema(default_config: dict) -> dict:
 
 def _missing_required_fields(metadata: dict, config: dict) -> list[str]:
     schema = dict(metadata.get("config_schema") or {})
+    default_config = dict(metadata.get("default_config") or {})
     missing: list[str] = []
     for field_name, spec in schema.items():
         if not spec.get("required"):
             continue
         value = config.get(field_name)
-        if value is None or value == "":
+        fallback = spec.get("default", default_config.get(field_name))
+        if (value is None or value == "") and (fallback is None or fallback == ""):
             missing.append(field_name)
     return missing
 
