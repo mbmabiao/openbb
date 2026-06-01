@@ -7,6 +7,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from backtesting.presenter import format_trade_table
 from backtesting.runner import run_backtest
 from strategies.registry import list_strategies
 
@@ -181,13 +182,11 @@ def _render_results(result) -> None:
     for idx, (label, value) in enumerate(metric_items):
         columns[idx % 4].metric(label, value)
 
-    chart_col, equity_col = st.columns([1.45, 1], gap="large")
-    with chart_col:
-        st.markdown("#### Executed Trades")
-        st.plotly_chart(_build_price_chart(result), use_container_width=True)
-    with equity_col:
-        st.markdown("#### Equity Curve")
-        st.plotly_chart(_build_equity_chart(result), use_container_width=True)
+    st.markdown("#### Executed Trades")
+    st.plotly_chart(_build_price_chart(result), use_container_width=True)
+
+    st.markdown("#### Equity Curve")
+    st.plotly_chart(_build_equity_chart(result), use_container_width=True)
 
     st.markdown("#### Trade Details")
     st.dataframe(_trades_to_frame(result.trades), use_container_width=True, hide_index=True)
@@ -204,8 +203,8 @@ def _build_price_chart(result) -> go.Figure:
             low=df["low"],
             close=df["close"],
             name="OHLC",
-            increasing_line_color="#38d5b5",
-            decreasing_line_color="#fb7185",
+            increasing_line_color="#fb7185",
+            decreasing_line_color="#38d5b5",
         )
     )
     for column in [column for column in df.columns if column.startswith("plot_")]:
@@ -215,26 +214,45 @@ def _build_price_chart(result) -> go.Figure:
         fig.add_trace(go.Scatter(x=overlay["date"], y=overlay[column], mode="lines", name=column.replace("plot_", "")))
 
     for trade in result.trades:
-        entry_color = "#38d5b5" if trade.type == "LONG" else "#fb7185"
-        fig.add_trace(
-            go.Scatter(
-                x=[trade.entry_time],
-                y=[trade.entry_price],
-                mode="markers",
-                marker={"symbol": "triangle-up", "size": 12, "color": entry_color},
-                name=f"{trade.type} entry",
-                showlegend=False,
-            )
+        entry_color = "#fb7185" if trade.type == "LONG" else "#38d5b5"
+        entry_label = "开多" if trade.type == "LONG" else "开空"
+        entry_offset = -92 if trade.type == "LONG" else 92
+        fig.add_annotation(
+            x=trade.entry_time,
+            y=trade.entry_price,
+            text=entry_label,
+            showarrow=True,
+            arrowhead=2,
+            arrowsize=1.05,
+            arrowwidth=2,
+            arrowcolor=entry_color,
+            ax=0,
+            ay=entry_offset,
+            bgcolor="rgba(5, 7, 13, 0.92)",
+            bordercolor=entry_color,
+            borderwidth=1,
+            borderpad=4,
+            font={"color": "#ffffff", "size": 11},
         )
-        fig.add_trace(
-            go.Scatter(
-                x=[trade.exit_time],
-                y=[trade.exit_price],
-                mode="markers",
-                marker={"symbol": "x", "size": 11, "color": "#ffffff"},
-                name=f"{trade.type} exit",
-                showlegend=False,
-            )
+        exit_label = "平多" if trade.type == "LONG" else "平空"
+        exit_color = "#38d5b5" if trade.type == "LONG" else "#fb7185"
+        exit_offset = 92 if trade.type == "LONG" else -92
+        fig.add_annotation(
+            x=trade.exit_time,
+            y=trade.exit_price,
+            text=exit_label,
+            showarrow=True,
+            arrowhead=2,
+            arrowsize=1.05,
+            arrowwidth=2,
+            arrowcolor=exit_color,
+            ax=0,
+            ay=exit_offset,
+            bgcolor="rgba(5, 7, 13, 0.92)",
+            bordercolor=exit_color,
+            borderwidth=1,
+            borderpad=4,
+            font={"color": "#ffffff", "size": 11},
         )
     fig.update_layout(template="plotly_dark", height=560, margin={"l": 10, "r": 10, "t": 20, "b": 10})
     fig.update_xaxes(rangeslider_visible=False)
@@ -251,23 +269,7 @@ def _build_equity_chart(result) -> go.Figure:
 
 
 def _trades_to_frame(trades: list) -> pd.DataFrame:
-    rows = [
-        {
-            "No.": trade.index,
-            "Type": trade.type,
-            "Exit reason": trade.exit_reason,
-            "Entry time": trade.entry_time,
-            "Exit time": trade.exit_time,
-            "Entry price": trade.entry_price,
-            "Exit price": trade.exit_price,
-            "PnL": trade.pnl,
-            "Balance": trade.balance,
-            "Bars held": trade.bars_held,
-            "Size source": trade.size_source,
-        }
-        for trade in trades
-    ]
-    return pd.DataFrame(rows)
+    return pd.DataFrame(format_trade_table(trades))
 
 
 def _infer_schema(default_config: dict) -> dict:

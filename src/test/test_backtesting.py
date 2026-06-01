@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from backtesting.engine import BacktestEngine
+from backtesting.presenter import format_trade_table
 from backtesting.runner import run_backtest_from_context
 from backtesting.schema import BacktestConfig
 from strategies.base import BaseStrategy, StrategyContext
@@ -86,6 +87,31 @@ def test_engine_applies_slippage_commission_and_config_sizing() -> None:
     assert first.exit_price < context.data["1d"].loc[3, "close"]
     assert first.position_notional == 2_500
     assert first.size_source == "config"
+
+
+def test_format_trade_table_returns_frontend_friendly_rows() -> None:
+    context = _context(_prices())
+    result = BacktestEngine().run(
+        context,
+        ConfigSizingStrategy(),
+        BacktestConfig(initial_capital=10_000, slippage=0.01, commission_pct=0.01, position_size_pct=0.25),
+    )
+    rows = format_trade_table(result.trades)
+    assert list(rows[0]) == [
+        "序号",
+        "方向",
+        "平仓原因",
+        "开仓时间",
+        "平仓时间",
+        "开仓价",
+        "平仓价",
+        "盈亏",
+        "余额",
+    ]
+    assert rows[0]["方向"] == "多头"
+    assert rows[0]["开仓价"].count(".") == 1
+    assert rows[0]["盈亏"].startswith("$") or rows[0]["盈亏"].startswith("-$")
+    assert "Size source" not in rows[0]
 
 
 def test_missing_signal_columns_are_filled_false() -> None:

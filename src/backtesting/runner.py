@@ -4,6 +4,7 @@ from dataclasses import fields
 
 from backtesting.data_context import build_strategy_context
 from backtesting.engine import BacktestEngine
+from backtesting.presenter import format_trade_table
 from backtesting.schema import BacktestConfig, BacktestResult
 from strategies.base import StrategyContext
 from strategies.registry import get_strategy
@@ -96,5 +97,5 @@ def build_chart_payload(result: BacktestResult) -> dict:
         "equity_curve": equity_curve,
         "metrics": result.metrics,
         "trades": trades,
+        "trade_table": format_trade_table(result.trades),
     }
-
