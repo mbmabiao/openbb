@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import pandas as pd
 
+import backtesting.data_context as data_context_module
 from backtesting.engine import BacktestEngine
+from backtesting.data_context import is_intraday_timeframe
 from backtesting.metrics import calculate_metrics
 from backtesting.presenter import format_trade_table
-from backtesting.runner import _trade_direction_from_flags, run_backtest_from_context
+from backtesting.runner import (
+    _trade_direction_from_flags,
+    resolve_extended_hours,
+    resolve_timeframe_requirements,
+    run_backtest_from_context,
+)
 from backtesting.schema import BacktestConfig, EquityPoint
 from strategies.base import BaseStrategy, StrategyContext
-from strategies.registry import list_strategies
+from strategies.registry import get_strategy, list_strategies
 
 
 class LongShortSyntheticStrategy(BaseStrategy):
@@ -89,6 +96,67 @@ def test_strategy_discovery_metadata_includes_config_schema() -> None:
     supertrend = next(item for item in strategies if item["name"] == "supertrend_atr_trailing")
     assert supertrend["config_schema"]["atr_period"]["type"] == "int"
     assert supertrend["default_config"]["direction"] == "both"
+
+
+def test_strategy_discovery_includes_extended_hours_metadata() -> None:
+    strategies = list_strategies()
+    premarket = next(item for item in strategies if item["name"] == "premarket_gap_mean_reversion")
+    assert premarket["preferred_primary_timeframe"] == "5m"
+    assert premarket["requires_extended_hours"] is True
+    assert premarket["supports_extended_hours"] is True
+    assert premarket["data_requirements"]["timeframes"]["5m"]["extended_hours"] is True
+    assert premarket["data_requirements"]["timeframes"]["1d"]["extended_hours"] is False
+
+
+def test_extended_hours_resolution_for_required_strategy() -> None:
+    strategy = get_strategy("premarket_gap_mean_reversion", {})
+    assert resolve_extended_hours(strategy, BacktestConfig(extended_hours=None)) is True
+    try:
+        resolve_extended_hours(strategy, BacktestConfig(extended_hours=False))
+    except ValueError as exc:
+        assert "requires extended-hours data" in str(exc)
+    else:
+        raise AssertionError("Expected required extended-hours strategy to reject disabled extended-hours.")
+
+
+def test_detailed_timeframe_requirements_preserve_per_timeframe_extended_hours() -> None:
+    strategy = get_strategy("premarket_gap_mean_reversion", {})
+    requirements = resolve_timeframe_requirements(strategy, BacktestConfig(primary_timeframe="5m", extended_hours=None))
+    assert requirements["timeframes"]["5m"]["extended_hours"] is True
+    assert requirements["timeframes"]["1d"]["extended_hours"] is False
+
+
+def test_load_timeframe_frame_passes_extended_hours_to_market_loader() -> None:
+    calls: list[dict] = []
+    original_fetch = data_context_module.fetch_price_history
+
+    def fake_fetch_price_history(**kwargs):
+        calls.append(kwargs)
+        return _prices()
+
+    data_context_module.fetch_price_history = fake_fetch_price_history
+    try:
+        frame = data_context_module._load_timeframe_frame(
+            symbol="MSFT",
+            timeframe="5m",
+            start_date="2025-01-01",
+            end_date="2025-01-02",
+            provider="yfinance",
+            extended_hours=True,
+        )
+    finally:
+        data_context_module.fetch_price_history = original_fetch
+
+    assert not frame.empty
+    assert calls[0]["extended_hours_value"] is True
+    assert calls[0]["interval_value"] == "5m"
+
+
+def test_is_intraday_timeframe_handles_common_strings() -> None:
+    for value in ["1m", "2m", "5m", "15m", "30m", "60m", "1h", "4h"]:
+        assert is_intraday_timeframe(value) is True
+    for value in ["1d", "d", "daily", "1w", "week", "monthly"]:
+        assert is_intraday_timeframe(value) is False
 
 
 def test_engine_executes_long_short_and_records_equity_curve() -> None:

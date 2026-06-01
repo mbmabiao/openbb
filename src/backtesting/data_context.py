@@ -16,6 +16,8 @@ def build_strategy_context(
     end_date: str | None,
     strategy_config: dict,
     provider: str | None = None,
+    extended_hours: bool = False,
+    data_requirements: dict | None = None,
 ) -> StrategyContext:
     """
     Load OHLCV frames for all required timeframes.
@@ -33,6 +35,11 @@ def build_strategy_context(
             start_date=start_date,
             end_date=end_date,
             provider=provider,
+            extended_hours=_resolve_timeframe_extended_hours(
+                timeframe=timeframe,
+                data_requirements=data_requirements,
+                fallback=extended_hours,
+            ),
         )
         for timeframe in timeframes
     }
@@ -79,6 +86,7 @@ def _load_timeframe_frame(
     start_date: str | None,
     end_date: str | None,
     provider: str | None,
+    extended_hours: bool = False,
 ) -> pd.DataFrame:
     result = fetch_price_history(
         symbol_value=symbol,
@@ -87,12 +95,48 @@ def _load_timeframe_frame(
         provider_value=provider,
         interval_value=timeframe,
         adjustment_value="splits_only",
-        extended_hours_value=False,
+        extended_hours_value=extended_hours,
     )
     frame = clean_price_history_frame(to_dataframe(result))
     if frame.empty:
         raise ValueError(f"No OHLCV data returned for {symbol} at timeframe {timeframe}.")
     return frame
+
+
+def _resolve_timeframe_extended_hours(
+    timeframe: str,
+    data_requirements: dict | None,
+    fallback: bool,
+) -> bool:
+    timeframe_requirements = (data_requirements or {}).get("timeframes", {})
+    requirement = timeframe_requirements.get(timeframe)
+    if requirement is None:
+        requirement = timeframe_requirements.get(str(timeframe).lower())
+    if isinstance(requirement, dict) and "extended_hours" in requirement:
+        return bool(requirement["extended_hours"])
+    return bool(fallback) if is_intraday_timeframe(timeframe) else False
+
+
+def is_intraday_timeframe(timeframe: str) -> bool:
+    normalized = str(timeframe or "").strip().lower()
+    if normalized in {"1d", "d", "day", "daily", "1w", "w", "week", "weekly", "1mo", "mo", "month", "monthly"}:
+        return False
+    if normalized.endswith("m"):
+        return _positive_number(normalized[:-1])
+    if normalized.endswith("min"):
+        return _positive_number(normalized[:-3])
+    if normalized.endswith("h"):
+        return _positive_number(normalized[:-1])
+    if normalized.endswith("hour"):
+        return _positive_number(normalized[:-4])
+    return False
+
+
+def _positive_number(value: str) -> bool:
+    try:
+        return float(value) > 0
+    except ValueError:
+        return False
 
 
 def _unique_timeframes(values: list[str]) -> list[str]:

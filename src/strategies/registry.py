@@ -53,6 +53,10 @@ def list_strategies() -> list[dict]:
                 "display_name": getattr(strategy_cls, "display_name", name),
                 "description": getattr(strategy_cls, "description", ""),
                 "required_timeframes": list(getattr(strategy_cls, "required_timeframes", ["1d"])),
+                "preferred_primary_timeframe": getattr(strategy_cls, "preferred_primary_timeframe", None),
+                "requires_extended_hours": bool(getattr(strategy_cls, "requires_extended_hours", False)),
+                "supports_extended_hours": bool(getattr(strategy_cls, "supports_extended_hours", False)),
+                "data_requirements": dict(getattr(strategy_cls, "data_requirements", {})),
                 "default_config": dict(getattr(strategy_cls, "default_config", {})),
                 "config_schema": dict(getattr(strategy_cls, "config_schema", {})),
             }
@@ -69,4 +73,3 @@ def get_strategy(name: str, config: dict | None = None) -> BaseStrategy:
         available = ", ".join(strategies) or "none"
         raise ValueError(f"Unknown strategy '{name}'. Available strategies: {available}")
     return strategies[name](config=config)
-

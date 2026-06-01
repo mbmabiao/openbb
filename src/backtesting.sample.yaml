@@ -12,6 +12,7 @@ backtest:
   exit_before_entry: true
   price_col: close
   price_provider: yfinance
+  extended_hours:
 
 strategy:
   name: supertrend_atr_trailing

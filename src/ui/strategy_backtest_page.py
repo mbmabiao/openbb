@@ -48,7 +48,12 @@ def render_strategy_backtest_page(default_symbol: str = "MSFT") -> None:
                 st.rerun()
         metadata = strategy_by_label[selected_label]
         required_timeframes = list(metadata.get("required_timeframes") or ["1d"])
-        primary_default = required_timeframes[0] if required_timeframes else "1d"
+        data_requirements = dict(metadata.get("data_requirements") or {})
+        primary_default = (
+            data_requirements.get("primary_timeframe")
+            or metadata.get("preferred_primary_timeframe")
+            or (required_timeframes[0] if required_timeframes else "1d")
+        )
         timeframe_options = _ordered_unique([primary_default, *required_timeframes, *TIMEFRAME_OPTIONS])
         primary_timeframe = st.selectbox(
             "Primary timeframe",
@@ -60,6 +65,16 @@ def render_strategy_backtest_page(default_symbol: str = "MSFT") -> None:
         start_date = st.date_input("Backtest start date", value=today - timedelta(days=365), key="bt_start")
         end_date = st.date_input("Backtest end date", value=today, key="bt_end")
         price_provider = st.text_input("Price provider", value="yfinance", key="bt_provider").strip() or None
+        requires_extended_hours = bool(metadata.get("requires_extended_hours"))
+        supports_extended_hours = bool(metadata.get("supports_extended_hours"))
+        extended_hours = st.checkbox(
+            "Extended Hours",
+            value=True if requires_extended_hours else False,
+            disabled=requires_extended_hours,
+            help=_extended_hours_help(requires_extended_hours, supports_extended_hours),
+        )
+        if requires_extended_hours:
+            st.caption("This strategy requires extended-hours intraday data.")
 
         st.markdown("#### Execution Settings")
         initial_capital = st.number_input("Initial capital", min_value=1.0, value=10_000.0, step=1_000.0)
@@ -103,6 +118,7 @@ def render_strategy_backtest_page(default_symbol: str = "MSFT") -> None:
             "start_date": str(start_date),
             "end_date": str(end_date),
             "price_provider": price_provider,
+            "extended_hours": bool(extended_hours),
         }
         with st.spinner("Running strategy backtest..."):
             try:
@@ -215,6 +231,8 @@ def _build_price_chart(result) -> go.Figure:
             name="OHLC",
             increasing_line_color="#fb7185",
             decreasing_line_color="#38d5b5",
+            increasing_line_width=4,
+            decreasing_line_width=4,
         )
     )
     for column in [column for column in df.columns if column.startswith("plot_")]:
@@ -234,7 +252,7 @@ def _build_price_chart(result) -> go.Figure:
     for trade in result.trades:
         entry_color = "#fb7185" if trade.type == "LONG" else "#38d5b5"
         entry_label = "开多" if trade.type == "LONG" else "开空"
-        entry_offset = -92 if trade.type == "LONG" else 92
+        entry_offset = -132 if trade.type == "LONG" else 132
         fig.add_annotation(
             x=trade.entry_time,
             y=trade.entry_price,
@@ -246,7 +264,7 @@ def _build_price_chart(result) -> go.Figure:
             arrowcolor=entry_color,
             ax=0,
             ay=entry_offset,
-            bgcolor="rgba(5, 7, 13, 0.92)",
+            bgcolor=entry_color,
             bordercolor=entry_color,
             borderwidth=1,
             borderpad=4,
@@ -254,7 +272,7 @@ def _build_price_chart(result) -> go.Figure:
         )
         exit_label = "平多" if trade.type == "LONG" else "平空"
         exit_color = "#38d5b5" if trade.type == "LONG" else "#fb7185"
-        exit_offset = 92 if trade.type == "LONG" else -92
+        exit_offset = 132 if trade.type == "LONG" else -132
         fig.add_annotation(
             x=trade.exit_time,
             y=trade.exit_price,
@@ -266,7 +284,7 @@ def _build_price_chart(result) -> go.Figure:
             arrowcolor=exit_color,
             ax=0,
             ay=exit_offset,
-            bgcolor="rgba(5, 7, 13, 0.92)",
+            bgcolor=exit_color,
             bordercolor=exit_color,
             borderwidth=1,
             borderpad=4,
@@ -323,6 +341,14 @@ def _reset_strategy_state() -> None:
     for key in list(st.session_state):
         if str(key).startswith("strategy_") or str(key).startswith("bt_primary_"):
             del st.session_state[key]
+
+
+def _extended_hours_help(requires_extended_hours: bool, supports_extended_hours: bool) -> str:
+    if requires_extended_hours:
+        return "This strategy requires premarket/after-hours intraday candles, so the option is locked on."
+    if supports_extended_hours:
+        return "Enable to include premarket and after-hours candles for intraday timeframes."
+    return "Optional framework-level data setting. Daily timeframes remain regular-session unless explicitly requested by a strategy."
 
 
 def _ordered_unique(values: list[str]) -> list[str]:

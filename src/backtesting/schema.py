@@ -20,6 +20,7 @@ class BacktestConfig:
     start_date: str | None = None
     end_date: str | None = None
     price_provider: str | None = None
+    extended_hours: bool | None = None
 
 
 @dataclass
@@ -72,4 +73,3 @@ class BacktestResult:
     trades: list[Trade] = field(default_factory=list)
     equity_curve: list[EquityPoint] = field(default_factory=list)
     metrics: dict[str, float | int | None] = field(default_factory=dict)
-

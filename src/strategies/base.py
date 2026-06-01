@@ -18,6 +18,10 @@ class BaseStrategy:
     display_name: str = "Base Strategy"
     description: str = ""
     required_timeframes: list[str] = ["1d"]
+    preferred_primary_timeframe: str | None = None
+    requires_extended_hours: bool = False
+    supports_extended_hours: bool = False
+    data_requirements: dict = {}
     default_config: dict = {}
     config_schema: dict = {}
 
@@ -29,4 +33,3 @@ class BaseStrategy:
 
     def generate_signals(self, context: StrategyContext) -> pd.DataFrame:
         raise NotImplementedError
-
