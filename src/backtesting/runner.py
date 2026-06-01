@@ -116,7 +116,7 @@ def resolve_timeframe_requirements(strategy, config: BacktestConfig) -> dict:
 
     return {
         **data_requirements,
-        "primary_timeframe": data_requirements.get("primary_timeframe", config.primary_timeframe),
+        "primary_timeframe": config.primary_timeframe,
         "timeframes": resolved_timeframes,
     }
 

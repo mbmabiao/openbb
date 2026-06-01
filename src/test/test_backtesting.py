@@ -126,6 +126,12 @@ def test_detailed_timeframe_requirements_preserve_per_timeframe_extended_hours()
     assert requirements["timeframes"]["1d"]["extended_hours"] is False
 
 
+def test_timeframe_requirements_primary_timeframe_uses_resolved_config_value() -> None:
+    strategy = get_strategy("premarket_gap_mean_reversion", {})
+    requirements = resolve_timeframe_requirements(strategy, BacktestConfig(primary_timeframe="15m", extended_hours=None))
+    assert requirements["primary_timeframe"] == "15m"
+
+
 def test_load_timeframe_frame_passes_extended_hours_to_market_loader() -> None:
     calls: list[dict] = []
     original_fetch = data_context_module.fetch_price_history
@@ -153,9 +159,32 @@ def test_load_timeframe_frame_passes_extended_hours_to_market_loader() -> None:
 
 
 def test_is_intraday_timeframe_handles_common_strings() -> None:
-    for value in ["1m", "2m", "5m", "15m", "30m", "60m", "1h", "4h"]:
+    for value in [
+        "1",
+        "5",
+        "15",
+        "30",
+        "60",
+        "1m",
+        "5m",
+        "15m",
+        "1min",
+        "5min",
+        "15min",
+        "1minute",
+        "5minutes",
+        "1h",
+        "2h",
+        "4h",
+        "1hr",
+        "2hrs",
+        "1hour",
+        "2hours",
+        "hourly",
+        "intraday",
+    ]:
         assert is_intraday_timeframe(value) is True
-    for value in ["1d", "d", "daily", "1w", "week", "monthly"]:
+    for value in ["1d", "d", "day", "daily", "1w", "week", "monthly", "1y", "year", "yearly"]:
         assert is_intraday_timeframe(value) is False
 
 

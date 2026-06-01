@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 
 import pandas as pd
@@ -118,25 +119,105 @@ def _resolve_timeframe_extended_hours(
 
 
 def is_intraday_timeframe(timeframe: str) -> bool:
+    """
+    Return True for intraday intervals such as:
+    1, 5, 15, 30, 60,
+    1m, 5m, 15m, 30m,
+    1min, 5min, 15min,
+    1minute, 5minutes,
+    1h, 2h, 4h,
+    1hr, 2hrs,
+    1hour, 2hours,
+    hourly.
+
+    Return False for daily or higher intervals such as:
+    1d, d, day, daily,
+    1w, w, week, weekly,
+    1mo, month, monthly,
+    1y, year, yearly.
+    """
     normalized = str(timeframe or "").strip().lower()
-    if normalized in {"1d", "d", "day", "daily", "1w", "w", "week", "weekly", "1mo", "mo", "month", "monthly"}:
-        return False
-    if normalized.endswith("m"):
-        return _positive_number(normalized[:-1])
-    if normalized.endswith("min"):
-        return _positive_number(normalized[:-3])
-    if normalized.endswith("h"):
-        return _positive_number(normalized[:-1])
-    if normalized.endswith("hour"):
-        return _positive_number(normalized[:-4])
-    return False
+    normalized = normalized.replace(" ", "")
+    normalized = normalized.replace("_", "")
+    normalized = normalized.replace("-", "")
 
-
-def _positive_number(value: str) -> bool:
-    try:
-        return float(value) > 0
-    except ValueError:
+    if not normalized:
         return False
+
+    daily_or_higher = {
+        "d",
+        "1d",
+        "day",
+        "1day",
+        "daily",
+        "w",
+        "1w",
+        "week",
+        "1week",
+        "weekly",
+        "mo",
+        "1mo",
+        "mon",
+        "1mon",
+        "month",
+        "1month",
+        "monthly",
+        "q",
+        "1q",
+        "quarter",
+        "1quarter",
+        "quarterly",
+        "y",
+        "1y",
+        "yr",
+        "1yr",
+        "year",
+        "1year",
+        "yearly",
+        "annual",
+        "annually",
+    }
+
+    if normalized in daily_or_higher:
+        return False
+
+    always_intraday = {
+        "hourly",
+        "intraday",
+    }
+
+    if normalized in always_intraday:
+        return True
+
+    if normalized.isdigit():
+        return int(normalized) > 0
+
+    match = re.fullmatch(
+        r"(?P<num>\d+(?:\.\d+)?)(?P<unit>m|min|mins|minute|minutes|h|hr|hrs|hour|hours)",
+        normalized,
+    )
+
+    if not match:
+        return False
+
+    value = float(match.group("num"))
+    unit = match.group("unit")
+
+    if value <= 0:
+        return False
+
+    return unit in {
+        "m",
+        "min",
+        "mins",
+        "minute",
+        "minutes",
+        "h",
+        "hr",
+        "hrs",
+        "hour",
+        "hours",
+    }
 
 
 def _unique_timeframes(values: list[str]) -> list[str]:
