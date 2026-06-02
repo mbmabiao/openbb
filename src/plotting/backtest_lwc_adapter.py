@@ -60,31 +60,32 @@ def build_backtest_lwc_series(result: BacktestResult) -> list[dict]:
     ]
 
     for index, column in enumerate(column for column in df.columns if column.startswith("plot_")):
-        line_data = _build_safe_overlay(df, column)
-        if not any("value" in point for point in line_data):
+        segments = _split_safe_overlay_segments(df, column)
+        if not segments:
             continue
 
         color = OVERLAY_COLORS[index % len(OVERLAY_COLORS)]
         label = column.replace("plot_", "").replace("_", " ").strip() or column
-        series.append(
-            {
-                "type": "Line",
-                "data": line_data,
-                "overlay_label": {
-                    "text": label,
-                    "color": color,
-                    "labelOnChart": False,
-                    "showInLegend": True,
-                },
-                "options": {
-                    "lineWidth": 2,
-                    "priceLineVisible": False,
-                    "lastValueVisible": False,
-                    "color": color,
-                    "lineStyle": 0,
-                },
-            }
-        )
+        for segment_index, segment in enumerate(segments):
+            series.append(
+                {
+                    "type": "Line",
+                    "data": segment,
+                    "overlay_label": {
+                        "text": label,
+                        "color": color,
+                        "labelOnChart": False,
+                        "showInLegend": segment_index == 0,
+                    },
+                    "options": {
+                        "lineWidth": 2,
+                        "priceLineVisible": False,
+                        "lastValueVisible": False,
+                        "color": color,
+                        "lineStyle": 0,
+                    },
+                }
+            )
 
     return series
 
@@ -139,8 +140,32 @@ def _build_volume(df: pd.DataFrame) -> list[dict]:
     ]
 
 
-def _build_safe_overlay(df: pd.DataFrame, column: str) -> list[dict]:
+def _split_safe_overlay_segments(df: pd.DataFrame, column: str) -> list[list[dict]]:
     values = pd.to_numeric(df[column], errors="coerce")
+    bounds = _overlay_price_bounds(df)
+    if bounds is None:
+        return []
+
+    lower_bound, upper_bound = bounds
+    segments: list[list[dict]] = []
+    current_segment: list[dict] = []
+
+    for time_value, value in zip(df["date"], values, strict=False):
+        if _is_safe_overlay_value(value, lower_bound=lower_bound, upper_bound=upper_bound):
+            current_segment.append({"time": to_lwc_time(time_value), "value": float(value)})
+            continue
+
+        if current_segment:
+            segments.append(current_segment)
+            current_segment = []
+
+    if current_segment:
+        segments.append(current_segment)
+
+    return segments
+
+
+def _overlay_price_bounds(df: pd.DataFrame) -> tuple[float, float] | None:
     low = pd.to_numeric(df["low"], errors="coerce")
     high = pd.to_numeric(df["high"], errors="coerce")
     close = pd.to_numeric(df["close"], errors="coerce")
@@ -149,7 +174,7 @@ def _build_safe_overlay(df: pd.DataFrame, column: str) -> list[dict]:
     finite_highs = high[np.isfinite(high)]
     finite_closes = close[np.isfinite(close)]
     if finite_lows.empty or finite_highs.empty:
-        return []
+        return None
 
     price_low = float(finite_lows.min())
     price_high = float(finite_highs.max())
@@ -158,15 +183,7 @@ def _build_safe_overlay(df: pd.DataFrame, column: str) -> list[dict]:
     padding = max(price_range * 5.0, abs(price_center) * 0.5, 1e-9)
     lower_bound = price_low - padding
     upper_bound = price_high + padding
-
-    line_data: list[dict] = []
-    for time_value, value in zip(df["date"], values, strict=False):
-        point_time = to_lwc_time(time_value)
-        if _is_safe_overlay_value(value, lower_bound=lower_bound, upper_bound=upper_bound):
-            line_data.append({"time": point_time, "value": float(value)})
-        else:
-            line_data.append({"time": point_time})
-    return line_data
+    return lower_bound, upper_bound
 
 
 def _is_safe_overlay_value(value: Any, *, lower_bound: float, upper_bound: float) -> bool:
@@ -193,14 +210,14 @@ def _build_trade_markers(trades: list) -> list[dict]:
                     time_value=getattr(trade, "entry_time", None),
                     position="belowBar" if is_long else "aboveBar",
                     color="#fb7185" if is_long else "#38d5b5",
-                    text="开多" if is_long else "开空",
+                    text="\u5f00\u591a" if is_long else "\u5f00\u7a7a",
                     stack_counts=stack_counts,
                 ),
                 _trade_marker(
                     time_value=getattr(trade, "exit_time", None),
                     position="aboveBar" if is_long else "belowBar",
                     color="#38d5b5" if is_long else "#fb7185",
-                    text="平多" if is_long else "平空",
+                    text="\u5e73\u591a" if is_long else "\u5e73\u7a7a",
                     stack_counts=stack_counts,
                 ),
             ]

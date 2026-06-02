@@ -13,6 +13,12 @@ from strategies.base import BaseStrategy, StrategyContext
 
 
 SIGNAL_COLUMNS = ("open_long", "close_long", "open_short", "close_short")
+ACTION_PRICE_COLUMNS = {
+    "open_long": "open_long_price",
+    "close_long": "close_long_price",
+    "open_short": "open_short_price",
+    "close_short": "close_short_price",
+}
 
 
 class BacktestEngine:
@@ -118,9 +124,15 @@ class BacktestEngine:
             return cash, position
 
         if bool(row["open_long"]) and config.allow_long:
-            return self._enter_position("long", row, row_number, price, cash, current_equity, config)
+            action_price = _resolve_action_price(row, "open_long", price)
+            if action_price is None:
+                return cash, position
+            return self._enter_position("long", row, row_number, action_price, cash, current_equity, config)
         if bool(row["open_short"]) and config.allow_short:
-            return self._enter_position("short", row, row_number, price, cash, current_equity, config)
+            action_price = _resolve_action_price(row, "open_short", price)
+            if action_price is None:
+                return cash, position
+            return self._enter_position("short", row, row_number, action_price, cash, current_equity, config)
         return cash, position
 
     def _maybe_exit(
@@ -136,9 +148,15 @@ class BacktestEngine:
         if position is None:
             return cash, None
         if position.side == "long" and bool(row["close_long"]):
-            return self._exit_position(row, row_number, price, cash, position, trades, config)
+            action_price = _resolve_action_price(row, "close_long", price)
+            if action_price is None:
+                return cash, position
+            return self._exit_position(row, row_number, action_price, cash, position, trades, config)
         if position.side == "short" and bool(row["close_short"]):
-            return self._exit_position(row, row_number, price, cash, position, trades, config)
+            action_price = _resolve_action_price(row, "close_short", price)
+            if action_price is None:
+                return cash, position
+            return self._exit_position(row, row_number, action_price, cash, position, trades, config)
         return cash, position
 
     def _enter_position(
@@ -251,6 +269,27 @@ def _validate_reversal_signal(row: pd.Series, position: Position | None) -> None
             f"open_long=True without close_short=True at {row['date']}. "
             "Close the short position before opening a long position."
         )
+
+
+def _resolve_action_price(row: pd.Series, action: str, fallback_price: float) -> float | None:
+    price_column = ACTION_PRICE_COLUMNS[action]
+    if price_column not in row.index:
+        return fallback_price
+
+    requested_price = _finite_float(row.get(price_column))
+    if requested_price is None or requested_price <= 0:
+        return fallback_price
+
+    low = _finite_float(row.get("low"))
+    high = _finite_float(row.get("high"))
+    if low is None or high is None:
+        return None
+
+    lower = min(low, high)
+    upper = max(low, high)
+    if lower <= requested_price <= upper:
+        return requested_price
+    return None
 
 
 def _resolve_position_size(row: pd.Series, equity: float, config: BacktestConfig) -> tuple[float, float, str]:

@@ -165,14 +165,31 @@ def _app_shell_css() -> str:
         color: inherit !important;
         font-weight: 800;
     }
-    button,
     [data-testid="baseButton-secondary"],
     [data-testid="baseButton-primary"] {
-        border: 1px solid rgba(255, 255, 255, 0.72) !important;
         border-radius: 8px !important;
+        font-weight: 800 !important;
     }
-    button p,
-    button span,
+    [data-testid="baseButton-secondary"] {
+        background: rgba(13, 20, 32, 0.92) !important;
+        border: 1px solid rgba(148, 163, 184, 0.34) !important;
+        color: #ffffff !important;
+    }
+    [data-testid="baseButton-secondary"]:hover {
+        background: rgba(30, 41, 59, 0.96) !important;
+        border-color: rgba(215, 226, 238, 0.58) !important;
+        color: #ffffff !important;
+    }
+    [data-testid="baseButton-primary"] {
+        background: linear-gradient(135deg, var(--qd-accent), #8bf5dd) !important;
+        border: 1px solid rgba(56, 213, 181, 0.86) !important;
+        color: #04110f !important;
+    }
+    [data-testid="baseButton-primary"]:hover {
+        background: linear-gradient(135deg, #5eead4, #b7fff0) !important;
+        border-color: rgba(139, 245, 221, 0.92) !important;
+        color: #04110f !important;
+    }
     [data-testid="baseButton-secondary"] p,
     [data-testid="baseButton-secondary"] span,
     [data-testid="baseButton-primary"] p,
@@ -231,7 +248,7 @@ st.markdown(f'<div class="app-brand">{APP_TITLE} <span>v1</span></div>', unsafe_
 
 top_page = st.radio(
     "Top navigation",
-    ("个股", "市场"),
+    ("个股", "回测", "市场"),
     horizontal=True,
     label_visibility="collapsed",
 )
@@ -245,43 +262,44 @@ if not controls.symbol:
     st.warning("Enter a symbol in the sidebar.")
     st.stop()
 
-tabs = st.tabs(list(TAB_NAMES))
+if top_page == "回测":
+    render_strategy_backtest_page(default_symbol=controls.symbol)
+    st.stop()
+
+tabs = st.tabs([name for name in TAB_NAMES if name != "Strategy Backtest"])
 
 with tabs[0]:
     render_historical_price_tab(controls)
 
 with tabs[1]:
-    render_strategy_backtest_page(default_symbol=controls.symbol)
-
-with tabs[2]:
     show_dataframe_result(
         f"Income Statement - {controls.symbol}",
         lambda: fetch_income_statement(controls.symbol, controls.fund_provider),
         empty_message="No income statement data returned.",
     )
 
-with tabs[3]:
+with tabs[2]:
     show_dataframe_result(
         f"Balance Sheet - {controls.symbol}",
         lambda: fetch_balance_sheet(controls.symbol, controls.fund_provider),
         empty_message="No balance sheet data returned.",
     )
 
-with tabs[4]:
+with tabs[3]:
     show_dataframe_result(
         f"Cash Flow - {controls.symbol}",
         lambda: fetch_cash_flow(controls.symbol, controls.fund_provider),
         empty_message="No cash flow data returned.",
     )
 
-with tabs[5]:
+with tabs[4]:
     show_dataframe_result(
         f"Ratios - {controls.symbol}",
         lambda: fetch_ratios(controls.symbol, controls.fund_provider),
         empty_message="No ratios data returned.",
     )
 
-with tabs[6]:
+with tabs[5]:
     show_news(
         f"Company News - {controls.symbol}",
         lambda: fetch_company_news(

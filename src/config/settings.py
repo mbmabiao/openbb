@@ -19,7 +19,7 @@ HISTORY_RANGE_OPTIONS = ("1Y", "3Y", "5Y", "10Y", "Max")
 
 @dataclass(frozen=True)
 class SidebarDefaults:
-    symbol: str = "000300.SS"
+    symbol: str = "NVDA"
     history_range: str = "5Y"
     news_limit: int = 10
     long_vp_lookback_days: int = 63
