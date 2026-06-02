@@ -20,6 +20,7 @@ TIMEFRAME_OPTIONS = ["1d", "1h", "30m", "15m", "5m"]
 
 def render_strategy_backtest_page(default_symbol: str = "MSFT") -> None:
     st.subheader("Strategy Backtest")
+    _render_backtest_page_css()
 
     strategies = list_strategies()
     if not strategies:
@@ -212,20 +213,12 @@ def _render_results(result) -> None:
         columns[idx % 4].metric(label, value)
 
     st.markdown("#### Executed Trades")
-    chart_options = build_chart_options(ChartDefaults(height=640, bar_spacing=14, min_bar_spacing=6))
-    chart_options["layout"] = {
-        "background": {"type": "solid", "color": "#05070d"},
-        "textColor": "#ffffff",
-        "fontSize": 12,
-    }
-    chart_options["grid"] = {
-        "vertLines": {"color": "rgba(148, 163, 184, 0.12)"},
-        "horzLines": {"color": "rgba(148, 163, 184, 0.12)"},
-    }
+    chart_options = build_chart_options(ChartDefaults(height=640, bar_spacing=14, min_bar_spacing=6), theme="dark")
     render_chart_payload(
         build_backtest_chart_payload(result),
         chart_key=f"backtest-{result.symbol}-{result.strategy_name}",
         chart_options=chart_options,
+        show_volume_profile=False,
     )
 
     st.markdown("#### Equity Curve")
@@ -246,6 +239,27 @@ def _build_equity_chart(result) -> go.Figure:
 
 def _trades_to_frame(trades: list) -> pd.DataFrame:
     return pd.DataFrame(format_trade_table(trades))
+
+
+def _render_backtest_page_css() -> None:
+    st.markdown(
+        """
+<style>
+div[data-testid="stHorizontalBlock"] button[kind="secondary"],
+div[data-testid="stHorizontalBlock"] [data-testid="baseButton-secondary"] button {
+    background: rgba(13, 20, 32, 0.92) !important;
+    border: 1px solid rgba(255, 255, 255, 0.72) !important;
+    color: #ffffff !important;
+}
+div[data-testid="stHorizontalBlock"] button[kind="secondary"] p,
+div[data-testid="stHorizontalBlock"] [data-testid="baseButton-secondary"] button p {
+    color: #ffffff !important;
+    font-weight: 800 !important;
+}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
 
 
 def _infer_schema(default_config: dict) -> dict:
