@@ -10,39 +10,28 @@ import streamlit.components.v1 as components
 from config.settings import ChartDefaults
 
 
-def build_chart_options(defaults: ChartDefaults | None = None, theme: str = "dark") -> dict:
+def build_chart_options(defaults: ChartDefaults | None = None) -> dict:
     defaults = defaults or ChartDefaults()
-    normalized_theme = str(theme or "dark").strip().lower()
-    if normalized_theme == "light":
-        background = "#ffffff"
-        text_color = "#222222"
-        grid_color = "rgba(197, 203, 206, 0.3)"
-        border_color = "rgba(197, 203, 206, 0.8)"
-    else:
-        background = "#05070d"
-        text_color = "#e5e7eb"
-        grid_color = "rgba(148, 163, 184, 0.12)"
-        border_color = "rgba(148, 163, 184, 0.28)"
     return {
         "layout": {
-            "background": {"type": "solid", "color": background},
-            "textColor": text_color,
+            "background": {"type": "solid", "color": "#ffffff"},
+            "textColor": "#222222",
             "fontSize": 12,
         },
         "grid": {
-            "vertLines": {"color": grid_color},
-            "horzLines": {"color": grid_color},
+            "vertLines": {"color": "rgba(197, 203, 206, 0.3)"},
+            "horzLines": {"color": "rgba(197, 203, 206, 0.3)"},
         },
         "crosshair": {"mode": 1},
         "rightPriceScale": {
-            "borderColor": border_color,
+            "borderColor": "rgba(197, 203, 206, 0.8)",
             "scaleMargins": {
                 "top": 0.08,
                 "bottom": 0.22,
             },
         },
         "timeScale": {
-            "borderColor": border_color,
+            "borderColor": "rgba(197, 203, 206, 0.8)",
             "timeVisible": True,
             "secondsVisible": False,
             "rightOffset": defaults.right_offset,
@@ -168,10 +157,9 @@ def build_lwc_series(
             "data": volume_data,
             "options": {
                 "priceFormat": {"type": "volume"},
-                "priceScaleId": "",
+                "priceScaleId": "volume",
             },
             "priceScale": {
-                "visible": False,
                 "scaleMargins": {
                     "top": 0.82,
                     "bottom": 0.0,
@@ -315,91 +303,6 @@ def build_lwc_series(
     return series
 
 
-def build_lwc_series_from_payload(payload: dict) -> list[dict]:
-    series: list[dict] = []
-    candles = list(payload.get("candles") or [])
-    volume = list(payload.get("volume") or [])
-    markers = list(payload.get("markers") or [])
-
-    if candles:
-        series.append(
-            {
-                "type": "Candlestick",
-                "data": candles,
-                "markers": markers,
-                "options": {
-                    "upColor": "#fb7185",
-                    "downColor": "#38d5b5",
-                    "borderUpColor": "#fb7185",
-                    "borderDownColor": "#38d5b5",
-                    "wickUpColor": "#fb7185",
-                    "wickDownColor": "#38d5b5",
-                    "priceLineVisible": True,
-                },
-            }
-        )
-
-    if volume:
-        series.append(
-            {
-                "type": "Histogram",
-                "data": volume,
-                "options": {
-                    "priceFormat": {"type": "volume"},
-                    "priceScaleId": "",
-                },
-                "priceScale": {
-                    "visible": False,
-                    "scaleMargins": {
-                        "top": 0.82,
-                        "bottom": 0.0,
-                    }
-                },
-            }
-        )
-
-    for overlay in payload.get("overlays") or []:
-        data = list(overlay.get("data") or [])
-        if not any("value" in point for point in data):
-            continue
-        series.append(
-            {
-                "type": "Line",
-                "data": data,
-                "legend_label": {
-                    "text": str(overlay.get("name", "")),
-                    "color": str(overlay.get("color", "#fbbf24")),
-                    "visible": bool(overlay.get("show_legend", True)),
-                },
-                "options": {
-                    "lineWidth": int(overlay.get("line_width", 2)),
-                    "priceLineVisible": False,
-                    "lastValueVisible": False,
-                    "color": str(overlay.get("color", "#fbbf24")),
-                    "lineStyle": 0,
-                },
-            }
-        )
-
-    return series
-
-
-def render_chart_payload(
-    payload: dict,
-    *,
-    chart_key: str,
-    chart_options: dict | None = None,
-    show_volume_profile: bool = True,
-):
-    options = chart_options or build_chart_options()
-    render_lwc_chart_with_focus_header(
-        chart_options=options,
-        series=build_lwc_series_from_payload(payload),
-        chart_key=chart_key,
-        show_volume_profile=show_volume_profile,
-    )
-
-
 def _build_pattern_event_markers(pattern_events: list[dict]) -> list[dict]:
     markers: list[dict] = []
     stack_counts: dict[tuple[str, str], int] = {}
@@ -463,48 +366,25 @@ def render_lwc_chart_with_focus_header(
     series: list[dict],
     chart_key: str,
     volume_profile_data: list[dict] | None = None,
-    show_volume_profile: bool = True,
 ):
     chart_height = int(chart_options.get("height", 700))
-    chart_background = (
-        (chart_options.get("layout") or {})
-        .get("background", {})
-        .get("color", "#ffffff")
-    )
-    is_dark_chart = chart_background.lower() != "#ffffff"
-    header_background = "rgba(5, 7, 13, 0.84)" if is_dark_chart else "rgba(255, 255, 255, 0.92)"
-    header_border = "rgba(148, 163, 184, 0.18)" if is_dark_chart else "rgba(17, 24, 39, 0.08)"
-    header_text = "#e5e7eb" if is_dark_chart else "#111827"
-    header_muted = "#94a3b8" if is_dark_chart else "#64748b"
-    label_background = "rgba(5, 7, 13, 0.88)" if is_dark_chart else "rgba(255, 255, 255, 0.95)"
-    label_shadow = "0 2px 8px rgba(0, 0, 0, 0.24)" if is_dark_chart else "0 2px 8px rgba(15, 23, 42, 0.08)"
-    volume_profile_enabled = bool(show_volume_profile and volume_profile_data)
-    profile_class = " has-volume-profile" if volume_profile_enabled else ""
     container_id = f"lwc-chart-{abs(hash(chart_key))}"
-    volume_profile_nodes = (
-        f"""
-  <div id="{container_id}-volume-profile-panel" class="lwc-volume-profile-panel"></div>
-  <div id="{container_id}-volume-profile" class="lwc-volume-profile"></div>"""
-        if volume_profile_enabled
-        else ""
-    )
     payload = json.dumps(
         {
             "chart": chart_options,
             "series": series,
             "volumeProfile": volume_profile_data or [],
-            "volumeProfileEnabled": volume_profile_enabled,
         },
         ensure_ascii=False,
     )
 
     html = f"""
-<div id="{container_id}" class="lwc-wrap{profile_class}">
+<div id="{container_id}" class="lwc-wrap">
   <div id="{container_id}-header" class="lwc-header"></div>
-  <div id="{container_id}-legend" class="lwc-legend"></div>
   <div id="{container_id}-zone-labels" class="lwc-zone-labels"></div>
   <div id="{container_id}-pattern-markers" class="lwc-pattern-markers"></div>
-{volume_profile_nodes}
+  <div id="{container_id}-volume-profile-panel" class="lwc-volume-profile-panel"></div>
+  <div id="{container_id}-volume-profile" class="lwc-volume-profile"></div>
   <div id="{container_id}-chart" class="lwc-chart"></div>
 </div>
 
@@ -512,14 +392,14 @@ def render_lwc_chart_with_focus_header(
   html, body {{
     margin: 0;
     padding: 0;
-    background: {chart_background};
+    background: #ffffff;
   }}
 
   .lwc-wrap {{
     position: relative;
     width: 100%;
     height: {chart_height}px;
-    background: {chart_background};
+    background: #ffffff;
     overflow: hidden;
     font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   }}
@@ -534,40 +414,6 @@ def render_lwc_chart_with_focus_header(
     inset: 0;
     z-index: 9;
     pointer-events: none;
-  }}
-
-  .lwc-legend {{
-    position: absolute;
-    top: 42px;
-    left: 10px;
-    z-index: 14;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    max-width: calc(100% - 120px);
-    pointer-events: none;
-  }}
-
-  .lwc-legend-item {{
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px 7px;
-    border-radius: 999px;
-    background: {label_background};
-    border: 1px solid {header_border};
-    color: {header_text};
-    font-size: 10px;
-    font-weight: 700;
-    line-height: 1.2;
-    box-shadow: {label_shadow};
-  }}
-
-  .lwc-legend-swatch {{
-    width: 12px;
-    height: 2px;
-    border-radius: 999px;
-    background: currentColor;
   }}
 
   .lwc-pattern-markers {{
@@ -590,13 +436,13 @@ def render_lwc_chart_with_focus_header(
     align-items: center;
     padding: 2px 5px;
     border-radius: 999px;
-    background: {label_background};
+    background: rgba(255, 255, 255, 0.96);
     border: 1px solid currentColor;
     font-size: 10px;
     font-weight: 700;
     line-height: 1.2;
     white-space: nowrap;
-    box-shadow: {label_shadow};
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
   }}
 
   .lwc-pattern-marker.above .lwc-pattern-label {{
@@ -655,11 +501,6 @@ def render_lwc_chart_with_focus_header(
     inset: 0;
     z-index: 8;
     pointer-events: none;
-    display: none;
-  }}
-
-  .lwc-wrap.has-volume-profile .lwc-volume-profile {{
-    display: block;
   }}
 
   .lwc-volume-profile-panel {{
@@ -675,15 +516,10 @@ def render_lwc_chart_with_focus_header(
         to right,
         rgba(148, 163, 184, 0.10) 0,
         rgba(148, 163, 184, 0.10) 1px,
-        rgba(5, 7, 13, 0.86) 1px,
-        rgba(5, 7, 13, 0.86) 100%
+        rgba(248, 250, 252, 0.96) 1px,
+        rgba(248, 250, 252, 0.96) 100%
       );
     border-left: 1px solid rgba(148, 163, 184, 0.14);
-    display: none;
-  }}
-
-  .lwc-wrap.has-volume-profile .lwc-volume-profile-panel {{
-    display: block;
   }}
 
   .lwc-zone-label {{
@@ -693,12 +529,12 @@ def render_lwc_chart_with_focus_header(
     transform: translateY(-50%);
     padding: 2px 6px;
     border-radius: 999px;
-    background: {label_background};
+    background: rgba(255, 255, 255, 0.95);
     border: 1px solid currentColor;
     font-size: 11px;
     font-weight: 700;
     line-height: 1.2;
-    box-shadow: {label_shadow};
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
     white-space: nowrap;
   }}
 
@@ -747,14 +583,14 @@ def render_lwc_chart_with_focus_header(
     right: 8px;
     padding: 4px 7px;
     border-radius: 6px;
-    background: {label_background};
+    background: rgba(255, 255, 255, 0.96);
     border: 1px solid rgba(245, 158, 11, 0.75);
-    color: #fbbf24;
+    color: #92400e;
     font-size: 10px;
     font-weight: 700;
     line-height: 1.25;
     white-space: normal;
-    box-shadow: {label_shadow};
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.10);
   }}
 
   .lwc-header {{
@@ -766,19 +602,19 @@ def render_lwc_chart_with_focus_header(
     align-items: center;
     gap: 16px;
     padding: 8px 12px;
-    background: {header_background};
-    border: 1px solid {header_border};
+    background: rgba(255, 255, 255, 0.92);
+    border: 1px solid rgba(15, 23, 42, 0.10);
     border-radius: 10px;
-    box-shadow: {label_shadow};
+    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
     backdrop-filter: blur(6px);
-    color: {header_text};
+    color: #1f2937;
     pointer-events: none;
   }}
 
   .lwc-header-date {{
     font-size: 12px;
     font-weight: 600;
-    color: {header_muted};
+    color: #475569;
     white-space: nowrap;
   }}
 
@@ -791,13 +627,13 @@ def render_lwc_chart_with_focus_header(
 
   .lwc-header-label {{
     font-size: 12px;
-    color: {header_muted};
+    color: #64748b;
   }}
 
   .lwc-header-value {{
     font-size: 16px;
     font-weight: 700;
-    color: {header_text};
+    color: #111827;
   }}
 </style>
 
@@ -808,7 +644,6 @@ def render_lwc_chart_with_focus_header(
   const header = document.getElementById("{container_id}-header");
   const zoneLabels = document.getElementById("{container_id}-zone-labels");
   const patternMarkersLayer = document.getElementById("{container_id}-pattern-markers");
-  const legend = document.getElementById("{container_id}-legend");
   const volumeProfilePanel = document.getElementById("{container_id}-volume-profile-panel");
   const volumeProfile = document.getElementById("{container_id}-volume-profile");
   const chartNode = document.getElementById("{container_id}-chart");
@@ -821,21 +656,14 @@ def render_lwc_chart_with_focus_header(
     return Math.max(Math.min(chartWidth * 0.2, 196), 108);
   }};
 
-  const volumeProfileEnabled = Boolean(payload.volumeProfileEnabled);
-  const getZoneBandRightOffset = () => priceScaleRightOffset + (volumeProfileEnabled ? getProfilePanelWidth() : 0);
+  const getZoneBandRightOffset = () => priceScaleRightOffset + getProfilePanelWidth();
 
   const normalizeTime = (value) => {{
     if (typeof value === "string") {{
       return value;
     }}
     if (typeof value === "number") {{
-      return new Date(value * 1000).toLocaleString(undefined, {{
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-      }});
+      return new Date(value * 1000).toISOString().slice(0, 10);
     }}
     if (value && typeof value === "object" && "year" in value) {{
       const y = String(value.year).padStart(4, "0");
@@ -890,7 +718,6 @@ def render_lwc_chart_with_focus_header(
   let primaryPriceSeries = null;
   const candleLookup = new Map();
   const zoneLabelSeries = [];
-  const legendItems = [];
   let patternEventMarkers = [];
 
   (payload.series || []).forEach((item) => {{
@@ -907,24 +734,11 @@ def render_lwc_chart_with_focus_header(
     }}
 
     if (item.markers && typeof createdSeries.setMarkers === "function") {{
-      createdSeries.setMarkers((item.markers || []).map((marker) => ({{
-        time: marker.time,
-        position: marker.position,
-        color: marker.color,
-        shape: marker.shape,
-        text: marker.text,
-      }})));
+      createdSeries.setMarkers(item.markers);
     }}
 
     if (item.pattern_event_markers && item.pattern_event_markers.length) {{
       patternEventMarkers = item.pattern_event_markers;
-    }}
-
-    if (item.legend_label && item.legend_label.visible !== false) {{
-      legendItems.push({{
-        text: item.legend_label.text || item.options?.title || "",
-        color: item.legend_label.color || item.options?.color || "#fbbf24",
-      }});
     }}
 
     if (item.overlay_label && item.data && item.data.length) {{
@@ -974,27 +788,6 @@ def render_lwc_chart_with_focus_header(
 
   const defaultBar = candleData.length ? candleData[candleData.length - 1] : null;
   renderHeader(defaultBar);
-
-  const renderLegend = () => {{
-    if (!legend) {{
-      return;
-    }}
-    legend.innerHTML = "";
-    legendItems
-      .filter((item) => item.text)
-      .forEach((item) => {{
-        const el = document.createElement("div");
-        el.className = "lwc-legend-item";
-        el.style.color = item.color || "#fbbf24";
-        const swatch = document.createElement("span");
-        swatch.className = "lwc-legend-swatch";
-        const text = document.createElement("span");
-        text.textContent = item.text;
-        el.appendChild(swatch);
-        el.appendChild(text);
-        legend.appendChild(el);
-      }});
-  }};
 
   const renderZoneLabels = () => {{
     if (!zoneLabels) {{
@@ -1082,7 +875,7 @@ def render_lwc_chart_with_focus_header(
   }};
 
   const renderVolumeProfile = () => {{
-    if (!volumeProfile || !volumeProfileEnabled) {{
+    if (!volumeProfile) {{
       return;
     }}
 
@@ -1186,22 +979,12 @@ def render_lwc_chart_with_focus_header(
   }});
 
   chart.timeScale().fitContent();
-  renderLegend();
   renderZoneLabels();
   renderPatternMarkers();
   renderVolumeProfile();
 
   const applyRightOffsetForProfile = () => {{
     const timeScaleOptions = payload.chart?.timeScale || {{}};
-    if (!volumeProfileEnabled) {{
-      chart.applyOptions({{
-        timeScale: {{
-          ...timeScaleOptions,
-          rightOffset: Number(timeScaleOptions.rightOffset) || 0,
-        }},
-      }});
-      return;
-    }}
     const profilePanelWidth = getProfilePanelWidth();
     const dividerPadding = 20;
     const barSpacing = Number(timeScaleOptions.barSpacing) || 12;
@@ -1223,7 +1006,6 @@ def render_lwc_chart_with_focus_header(
     const width = root.clientWidth || 900;
     chart.applyOptions({{ width }});
     applyRightOffsetForProfile();
-    renderLegend();
     renderZoneLabels();
     renderPatternMarkers();
     renderVolumeProfile();
