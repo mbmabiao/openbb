@@ -7,6 +7,7 @@ PAGE_TITLE = "Institutional Support/Resistance Dashboard"
 APP_TITLE = "Equity Data Dashboard"
 TAB_NAMES = (
     "Historical Price",
+    "Strategy Backtest",
     "Income",
     "Balance Sheet",
     "Cash Flow",

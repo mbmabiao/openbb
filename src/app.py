@@ -165,47 +165,14 @@ def _app_shell_css() -> str:
         color: inherit !important;
         font-weight: 800;
     }
+    button,
     [data-testid="baseButton-secondary"],
     [data-testid="baseButton-primary"] {
         border: 1px solid rgba(255, 255, 255, 0.72) !important;
         border-radius: 8px !important;
-        box-shadow: none !important;
     }
-    [data-testid="baseButton-secondary"] {
-        background: rgba(13, 20, 32, 0.84) !important;
-        color: var(--qd-text) !important;
-    }
-    [data-testid="baseButton-secondary"] button,
-    [data-testid="baseButton-secondary"] > button,
-    [data-testid="baseButton-secondary"] div {
-        background: rgba(13, 20, 32, 0.84) !important;
-        color: var(--qd-text) !important;
-    }
-    [data-testid="baseButton-secondary"]:hover {
-        background: rgba(255, 255, 255, 0.08) !important;
-        border-color: rgba(255, 255, 255, 0.9) !important;
-        color: #ffffff !important;
-    }
-    [data-testid="baseButton-secondary"]:hover button,
-    [data-testid="baseButton-secondary"]:hover div {
-        background: rgba(255, 255, 255, 0.08) !important;
-        color: #ffffff !important;
-    }
-    [data-testid="baseButton-primary"] {
-        background: linear-gradient(135deg, var(--qd-accent), #8bf5dd) !important;
-        border-color: rgba(56, 213, 181, 0.9) !important;
-        color: #04110f !important;
-    }
-    [data-testid="baseButton-primary"] button,
-    [data-testid="baseButton-primary"] > button,
-    [data-testid="baseButton-primary"] div {
-        background: linear-gradient(135deg, var(--qd-accent), #8bf5dd) !important;
-        color: #04110f !important;
-    }
-    [data-testid="baseButton-primary"]:hover {
-        background: linear-gradient(135deg, #5ee6cb, #a8fff0) !important;
-        color: #04110f !important;
-    }
+    button p,
+    button span,
     [data-testid="baseButton-secondary"] p,
     [data-testid="baseButton-secondary"] span,
     [data-testid="baseButton-primary"] p,
@@ -264,17 +231,13 @@ st.markdown(f'<div class="app-brand">{APP_TITLE} <span>v1</span></div>', unsafe_
 
 top_page = st.radio(
     "Top navigation",
-    ("个股", "市场", "回测"),
+    ("个股", "市场"),
     horizontal=True,
     label_visibility="collapsed",
 )
 
 if top_page == "市场":
     render_market_dashboard()
-    st.stop()
-
-if top_page == "回测":
-    render_strategy_backtest_page(default_symbol="MSFT")
     st.stop()
 
 controls = render_sidebar()
@@ -288,34 +251,37 @@ with tabs[0]:
     render_historical_price_tab(controls)
 
 with tabs[1]:
+    render_strategy_backtest_page(default_symbol=controls.symbol)
+
+with tabs[2]:
     show_dataframe_result(
         f"Income Statement - {controls.symbol}",
         lambda: fetch_income_statement(controls.symbol, controls.fund_provider),
         empty_message="No income statement data returned.",
     )
 
-with tabs[2]:
+with tabs[3]:
     show_dataframe_result(
         f"Balance Sheet - {controls.symbol}",
         lambda: fetch_balance_sheet(controls.symbol, controls.fund_provider),
         empty_message="No balance sheet data returned.",
     )
 
-with tabs[3]:
+with tabs[4]:
     show_dataframe_result(
         f"Cash Flow - {controls.symbol}",
         lambda: fetch_cash_flow(controls.symbol, controls.fund_provider),
         empty_message="No cash flow data returned.",
     )
 
-with tabs[4]:
+with tabs[5]:
     show_dataframe_result(
         f"Ratios - {controls.symbol}",
         lambda: fetch_ratios(controls.symbol, controls.fund_provider),
         empty_message="No ratios data returned.",
     )
 
-with tabs[5]:
+with tabs[6]:
     show_news(
         f"Company News - {controls.symbol}",
         lambda: fetch_company_news(

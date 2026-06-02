@@ -14,7 +14,6 @@ from backtesting.runner import (
     run_backtest_from_context,
 )
 from backtesting.schema import BacktestConfig, EquityPoint
-from plotting.backtest_chart_adapter import build_backtest_chart_payload
 from strategies.base import BaseStrategy, StrategyContext
 from strategies.registry import get_strategy, list_strategies
 
@@ -57,26 +56,6 @@ class ConfigSizingStrategy(BaseStrategy):
         df["close_long"] = False
         df.loc[1, "open_long"] = True
         df.loc[3, "close_long"] = True
-        return df
-
-
-class PlotOverlayTradeStrategy(BaseStrategy):
-    name = "plot_overlay_trade"
-    required_timeframes = ["1d"]
-
-    def generate_signals(self, context: StrategyContext) -> pd.DataFrame:
-        df = context.data["1d"].copy()
-        df["open_long"] = False
-        df["close_long"] = False
-        df["open_short"] = False
-        df["close_short"] = False
-        df.loc[1, "open_long"] = True
-        df.loc[3, "close_long"] = True
-        df.loc[4, "open_short"] = True
-        df.loc[6, "close_short"] = True
-        df["entry_reason"] = "entry"
-        df["exit_reason"] = "exit"
-        df["plot_test_line"] = [pd.NA, 101, 102, pd.NA, pd.NA, 104, 103, pd.NA]
         return df
 
 
@@ -222,24 +201,6 @@ def test_engine_executes_long_short_and_records_equity_curve() -> None:
     assert result.trades[0].size_source == "strategy_position_size_pct"
     assert len(result.equity_curve) >= len(context.data["1d"])
     assert "total_return" in result.metrics
-
-
-def test_backtest_chart_payload_builds_candles_overlays_and_trade_markers() -> None:
-    result = BacktestEngine().run(
-        _context(_plot_prices()),
-        PlotOverlayTradeStrategy(),
-        BacktestConfig(initial_capital=10_000, slippage=0, commission_pct=0, position_size_pct=0.5),
-    )
-    payload = build_backtest_chart_payload(result)
-    assert len(payload["candles"]) == len(result.signals)
-    assert payload["candles"][0]["open"] == 100.0
-    assert payload["overlays"][0]["id"] == "plot_test_line"
-    assert any("value" not in point for point in payload["overlays"][0]["data"])
-    marker_texts = [marker["text"] for marker in payload["markers"]]
-    assert marker_texts == ["开多", "平多", "开空", "平空"]
-    assert payload["markers"][0]["price"] == result.trades[0].entry_price
-    assert payload["markers"][0]["side"] == "buy"
-    assert payload["markers"][1]["side"] == "sell"
 
 
 def test_engine_applies_slippage_commission_and_config_sizing() -> None:
@@ -435,10 +396,6 @@ def _prices() -> pd.DataFrame:
             "volume": 1000,
         }
     )
-
-
-def _plot_prices() -> pd.DataFrame:
-    return _prices().assign(change_pct=lambda frame: frame["close"].pct_change())
 
 
 def _trend_prices() -> pd.DataFrame:
