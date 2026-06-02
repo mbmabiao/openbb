@@ -9,6 +9,9 @@ import streamlit as st
 
 from backtesting.presenter import format_trade_table
 from backtesting.runner import run_backtest
+from config.settings import ChartDefaults
+from plotting.backtest_chart_adapter import build_backtest_chart_payload
+from plotting.chart_builder import build_chart_options, render_chart_payload
 from strategies.registry import discover_strategies, list_strategies
 
 
@@ -209,90 +212,27 @@ def _render_results(result) -> None:
         columns[idx % 4].metric(label, value)
 
     st.markdown("#### Executed Trades")
-    st.plotly_chart(_build_price_chart(result), use_container_width=True)
+    chart_options = build_chart_options(ChartDefaults(height=640, bar_spacing=14, min_bar_spacing=6))
+    chart_options["layout"] = {
+        "background": {"type": "solid", "color": "#05070d"},
+        "textColor": "#ffffff",
+        "fontSize": 12,
+    }
+    chart_options["grid"] = {
+        "vertLines": {"color": "rgba(148, 163, 184, 0.12)"},
+        "horzLines": {"color": "rgba(148, 163, 184, 0.12)"},
+    }
+    render_chart_payload(
+        build_backtest_chart_payload(result),
+        chart_key=f"backtest-{result.symbol}-{result.strategy_name}",
+        chart_options=chart_options,
+    )
 
     st.markdown("#### Equity Curve")
     st.plotly_chart(_build_equity_chart(result), use_container_width=True)
 
     st.markdown("#### Trade Details")
     st.dataframe(_trades_to_frame(result.trades), use_container_width=True, hide_index=True)
-
-
-def _build_price_chart(result) -> go.Figure:
-    df = result.signals
-    fig = go.Figure()
-    fig.add_trace(
-        go.Candlestick(
-            x=df["date"],
-            open=df["open"],
-            high=df["high"],
-            low=df["low"],
-            close=df["close"],
-            name="OHLC",
-            increasing_line_color="#fb7185",
-            decreasing_line_color="#38d5b5",
-            increasing_line_width=4,
-            decreasing_line_width=4,
-        )
-    )
-    for column in [column for column in df.columns if column.startswith("plot_")]:
-        overlay = df.loc[:, ["date", column]].copy()
-        if overlay[column].dropna().empty:
-            continue
-        fig.add_trace(
-            go.Scatter(
-                x=overlay["date"],
-                y=overlay[column],
-                mode="lines",
-                name=column.replace("plot_", ""),
-                connectgaps=False,
-            )
-        )
-
-    for trade in result.trades:
-        entry_color = "#fb7185" if trade.type == "LONG" else "#38d5b5"
-        entry_label = "开多" if trade.type == "LONG" else "开空"
-        entry_offset = -132 if trade.type == "LONG" else 132
-        fig.add_annotation(
-            x=trade.entry_time,
-            y=trade.entry_price,
-            text=entry_label,
-            showarrow=True,
-            arrowhead=2,
-            arrowsize=1.05,
-            arrowwidth=2,
-            arrowcolor=entry_color,
-            ax=0,
-            ay=entry_offset,
-            bgcolor=entry_color,
-            bordercolor=entry_color,
-            borderwidth=1,
-            borderpad=4,
-            font={"color": "#ffffff", "size": 11},
-        )
-        exit_label = "平多" if trade.type == "LONG" else "平空"
-        exit_color = "#38d5b5" if trade.type == "LONG" else "#fb7185"
-        exit_offset = 132 if trade.type == "LONG" else -132
-        fig.add_annotation(
-            x=trade.exit_time,
-            y=trade.exit_price,
-            text=exit_label,
-            showarrow=True,
-            arrowhead=2,
-            arrowsize=1.05,
-            arrowwidth=2,
-            arrowcolor=exit_color,
-            ax=0,
-            ay=exit_offset,
-            bgcolor=exit_color,
-            bordercolor=exit_color,
-            borderwidth=1,
-            borderpad=4,
-            font={"color": "#ffffff", "size": 11},
-        )
-    fig.update_layout(template="plotly_dark", height=560, margin={"l": 10, "r": 10, "t": 20, "b": 10})
-    fig.update_xaxes(rangeslider_visible=False)
-    return fig
 
 
 def _build_equity_chart(result) -> go.Figure:
