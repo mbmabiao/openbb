@@ -1,0 +1,42 @@
+zone_generation:
+  atr_period: 20
+  weekly_swing_max_points_per_side: 3
+  swing_left_bars: 2
+  swing_right_bars: 2
+  swing_volume_lookback_bars: 20
+  swing_volume_quantile: 0.75
+  strength_lookback_weeks: 52
+
+lifecycle:
+  default_lookback_years: 2
+  weekly_swing_expiration_days: 182
+  event_zone_ttl_bars:
+    "1w": 26
+    w: 26
+
+pattern_events:
+  lookback_bars: 20
+  high_volume_percentile: 0.90
+  low_price_movement_percentile: 0.10
+  long_wick_ratio: 0.40
+  long_wick_atr_multiple: 0.30
+  atr_period: 20
+
+macd_divergence:
+  enabled: true
+  fast_period: 12
+  slow_period: 26
+  signal_period: 9
+  swing_left_bars: 5
+  swing_right_bars: 5
+  min_bar_distance: 1
+
+breakout:
+  breakout_confirm_buffer_atr: 0.10
+  failure_buffer_atr: 0.10
+  strong_follow_through_atr: 1.00
+  weak_follow_through_atr: 0.30
+  follow_through_window_bars: 5
+  fast_failure_window_bars: 3
+  failure_window_bars: 10
+  retest_window_bars: 3
