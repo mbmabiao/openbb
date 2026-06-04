@@ -165,19 +165,22 @@ def _app_shell_css() -> str:
         color: inherit !important;
         font-weight: 800;
     }
+    div[data-testid="stButton"] > button,
     [data-testid="baseButton-secondary"],
     [data-testid="baseButton-primary"] {
         border-radius: 8px !important;
         font-weight: 800 !important;
     }
+    div[data-testid="stButton"] > button,
     [data-testid="baseButton-secondary"] {
-        background: rgba(13, 20, 32, 0.92) !important;
-        border: 1px solid rgba(148, 163, 184, 0.34) !important;
+        background: #05070d !important;
+        border: 1px solid rgba(255, 255, 255, 0.78) !important;
         color: #ffffff !important;
     }
+    div[data-testid="stButton"] > button:hover,
     [data-testid="baseButton-secondary"]:hover {
-        background: rgba(30, 41, 59, 0.96) !important;
-        border-color: rgba(215, 226, 238, 0.58) !important;
+        background: #0d1420 !important;
+        border-color: #ffffff !important;
         color: #ffffff !important;
     }
     [data-testid="baseButton-primary"] {
@@ -238,6 +241,23 @@ def _app_shell_css() -> str:
     textarea {
         color: var(--qd-text) !important;
     }
+    .strategy-protocol-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        margin: -0.15rem 0 0.85rem 0;
+        font-size: 0.88rem;
+        font-weight: 700;
+        color: var(--qd-muted);
+    }
+    .strategy-protocol-link a {
+        color: var(--qd-accent);
+        text-decoration: underline;
+        text-underline-offset: 3px;
+    }
+    .strategy-protocol-link a:hover {
+        color: #8bf5dd;
+    }
     </style>
     """
 
@@ -248,12 +268,12 @@ st.markdown(f'<div class="app-brand">{APP_TITLE} <span>v1</span></div>', unsafe_
 
 top_page = st.radio(
     "Top navigation",
-    ("个股", "回测", "市场"),
+    ("Stock", "Backtest", "Market"),
     horizontal=True,
     label_visibility="collapsed",
 )
 
-if top_page == "市场":
+if top_page == "Market":
     render_market_dashboard()
     st.stop()
 
@@ -262,7 +282,7 @@ if not controls.symbol:
     st.warning("Enter a symbol in the sidebar.")
     st.stop()
 
-if top_page == "回测":
+if top_page == "Backtest":
     render_strategy_backtest_page(default_symbol=controls.symbol)
     st.stop()
 

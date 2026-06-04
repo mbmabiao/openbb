@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -15,10 +17,12 @@ from strategies.registry import discover_strategies, list_strategies
 
 
 TIMEFRAME_OPTIONS = ["1d", "1h", "30m", "15m", "5m"]
+STRATEGY_PROTOCOL_PATH = Path(__file__).resolve().parents[1] / "backtesting" / "README.md"
 
 
 def render_strategy_backtest_page(default_symbol: str = "MSFT") -> None:
     st.subheader("Strategy Backtest")
+    _render_strategy_protocol_download_link()
 
     strategies = list_strategies()
     if not strategies:
@@ -191,6 +195,35 @@ def _render_strategy_config(metadata: dict) -> dict:
         else:
             config[field_name] = st.text_input(label, value="" if default is None else str(default), help=help_text, key=key)
     return config
+
+
+def _load_strategy_protocol_doc() -> str:
+    try:
+        return STRATEGY_PROTOCOL_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return (
+            "# Backtesting Strategy Protocol\n\n"
+            "Required signal columns: open_long, close_long, open_short, close_short.\n"
+            "Optional execution price columns: open_long_price, close_long_price, "
+            "open_short_price, close_short_price.\n"
+        )
+
+
+def _render_strategy_protocol_download_link() -> None:
+    encoded = base64.b64encode(_load_strategy_protocol_doc().encode("utf-8")).decode("ascii")
+    href = (
+        "data:text/markdown;charset=utf-8;base64,"
+        f"{encoded}"
+    )
+    st.markdown(
+        f"""
+        <div class="strategy-protocol-link">
+            <span aria-hidden="true">↓</span>
+            <a href="{href}" download="backtesting_strategy_protocol.md">download develop protocol</a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _render_results(result) -> None:

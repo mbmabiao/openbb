@@ -68,7 +68,7 @@ def render_sidebar(defaults: SidebarDefaults | None = None) -> DashboardControls
     show_atr_bands = st.sidebar.checkbox("Show recent 20-day ATR bands", value=defaults.show_atr_bands)
     atr_multiplier = st.sidebar.slider(
         "ATR multiple",
-        min_value=1.5,
+        min_value=0.5,
         max_value=3.0,
         value=defaults.atr_multiplier,
         step=0.1,

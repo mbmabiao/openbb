@@ -11,7 +11,8 @@ class PremarketGapMeanReversionStrategy(BaseStrategy):
     display_name = "Premarket Gap Mean Reversion"
     description = (
         "Mean-reversion strategy using premarket 5-minute candles and "
-        "previous daily close / previous daily ATR context."
+        "previous daily close / previous daily ATR context. Entries and exits "
+        "use intrabar trigger prices when available."
     )
 
     required_timeframes = ["5m", "1d"]
@@ -130,18 +131,24 @@ class PremarketGapMeanReversionStrategy(BaseStrategy):
 
             prev_close = _to_float(row.get("prev_daily_close"))
             daily_atr = _to_float(row.get("prev_daily_atr"))
-            close = _to_float(row["close"])
+            open_price = _to_float(row["open"])
             high = _to_float(row["high"])
             low = _to_float(row["low"])
+            close = _to_float(row["close"])
 
             if not np.isfinite(prev_close) or prev_close <= 0:
                 continue
-            if not np.isfinite(close):
+            if not all(np.isfinite(value) for value in [open_price, high, low, close]):
                 continue
+
+            has_atr = np.isfinite(daily_atr) and daily_atr > 0
+
+            long_trigger = prev_close - gap_atr_mult * daily_atr if has_atr else np.nan
+            short_trigger = prev_close + gap_atr_mult * daily_atr if has_atr else np.nan
 
             gap_abs = close - prev_close
             gap_pct = gap_abs / prev_close
-            gap_atr = gap_abs / daily_atr if np.isfinite(daily_atr) and daily_atr > 0 else np.nan
+            gap_atr = gap_abs / daily_atr if has_atr else np.nan
 
             df.at[idx, "gap_abs"] = gap_abs
             df.at[idx, "gap_pct"] = gap_pct
@@ -149,24 +156,44 @@ class PremarketGapMeanReversionStrategy(BaseStrategy):
             df.at[idx, "plot_prev_close"] = prev_close
             df.at[idx, "plot_gap_target"] = prev_close
 
+            if np.isfinite(long_trigger):
+                df.at[idx, "plot_long_trigger"] = long_trigger
+            if np.isfinite(short_trigger):
+                df.at[idx, "plot_short_trigger"] = short_trigger
+
             # 1) Manage open position first.
             if position == "long":
                 if np.isfinite(stop_price):
                     df.at[idx, "plot_atr_stop"] = stop_price
 
-                gap_filled = close >= prev_close
-                stopped = np.isfinite(stop_price) and np.isfinite(low) and low <= stop_price
-                regular_open_exit = exit_after_regular_open and session_type == "regular"
+                stopped = _bar_contains_price(low, high, stop_price)
+                gap_filled = _bar_contains_price(low, high, prev_close)
+                regular_open_exit = (
+                    exit_after_regular_open
+                    and session_type == "regular"
+                    and _bar_contains_price(low, high, open_price)
+                )
 
-                if gap_filled or stopped or regular_open_exit:
+                if stopped:
                     df.at[idx, "close_long"] = True
-                    df.at[idx, "exit_reason"] = (
-                        "Gap filled"
-                        if gap_filled
-                        else "ATR stop"
-                        if stopped
-                        else "Regular session open exit"
-                    )
+                    df.at[idx, "close_long_price"] = stop_price
+                    df.at[idx, "exit_reason"] = "ATR stop"
+                    position = None
+                    stop_price = np.nan
+                    continue
+
+                if gap_filled:
+                    df.at[idx, "close_long"] = True
+                    df.at[idx, "close_long_price"] = prev_close
+                    df.at[idx, "exit_reason"] = "Gap filled"
+                    position = None
+                    stop_price = np.nan
+                    continue
+
+                if regular_open_exit:
+                    df.at[idx, "close_long"] = True
+                    df.at[idx, "close_long_price"] = open_price
+                    df.at[idx, "exit_reason"] = "Regular session open exit"
                     position = None
                     stop_price = np.nan
                     continue
@@ -175,26 +202,39 @@ class PremarketGapMeanReversionStrategy(BaseStrategy):
                 if np.isfinite(stop_price):
                     df.at[idx, "plot_atr_stop"] = stop_price
 
-                gap_filled = close <= prev_close
-                stopped = np.isfinite(stop_price) and np.isfinite(high) and high >= stop_price
-                regular_open_exit = exit_after_regular_open and session_type == "regular"
+                stopped = _bar_contains_price(low, high, stop_price)
+                gap_filled = _bar_contains_price(low, high, prev_close)
+                regular_open_exit = (
+                    exit_after_regular_open
+                    and session_type == "regular"
+                    and _bar_contains_price(low, high, open_price)
+                )
 
-                if gap_filled or stopped or regular_open_exit:
+                if stopped:
                     df.at[idx, "close_short"] = True
-                    df.at[idx, "exit_reason"] = (
-                        "Gap filled"
-                        if gap_filled
-                        else "ATR stop"
-                        if stopped
-                        else "Regular session open exit"
-                    )
+                    df.at[idx, "close_short_price"] = stop_price
+                    df.at[idx, "exit_reason"] = "ATR stop"
                     position = None
                     stop_price = np.nan
                     continue
 
-            # 2) Entry: allow entries during the entire premarket session only.
-            # Premarket: 04:00 - 09:30.
-            # No entries during regular session, after-hours, or closed hours.
+                if gap_filled:
+                    df.at[idx, "close_short"] = True
+                    df.at[idx, "close_short_price"] = prev_close
+                    df.at[idx, "exit_reason"] = "Gap filled"
+                    position = None
+                    stop_price = np.nan
+                    continue
+
+                if regular_open_exit:
+                    df.at[idx, "close_short"] = True
+                    df.at[idx, "close_short_price"] = open_price
+                    df.at[idx, "exit_reason"] = "Regular session open exit"
+                    position = None
+                    stop_price = np.nan
+                    continue
+
+            # 2) Entry: entire premarket only. No regular/after-hours entries.
             # Max one trade per session date.
             if position is not None:
                 continue
@@ -202,30 +242,32 @@ class PremarketGapMeanReversionStrategy(BaseStrategy):
                 continue
             if session_date in traded_session_dates:
                 continue
-            if not np.isfinite(daily_atr) or daily_atr <= 0:
+            if not has_atr:
                 continue
 
-            gap_down = gap_abs <= -gap_atr_mult * daily_atr
-            gap_up = gap_abs >= gap_atr_mult * daily_atr
+            long_triggered = allow_long and _bar_contains_price(low, high, long_trigger)
+            short_triggered = allow_short and _bar_contains_price(low, high, short_trigger)
 
-            if gap_down and allow_long:
+            if long_triggered:
                 df.at[idx, "open_long"] = True
-                df.at[idx, "entry_reason"] = f"Premarket gap down >= {gap_atr_mult:.2f} ATR"
+                df.at[idx, "open_long_price"] = long_trigger
+                df.at[idx, "entry_reason"] = f"Premarket gap down touched {gap_atr_mult:.2f} ATR trigger"
 
                 position = "long"
                 traded_session_dates.add(session_date)
 
-                stop_price = close - stop_atr_mult * daily_atr
+                stop_price = long_trigger - stop_atr_mult * daily_atr
                 df.at[idx, "plot_atr_stop"] = stop_price
 
-            elif gap_up and allow_short:
+            elif short_triggered:
                 df.at[idx, "open_short"] = True
-                df.at[idx, "entry_reason"] = f"Premarket gap up >= {gap_atr_mult:.2f} ATR"
+                df.at[idx, "open_short_price"] = short_trigger
+                df.at[idx, "entry_reason"] = f"Premarket gap up touched {gap_atr_mult:.2f} ATR trigger"
 
                 position = "short"
                 traded_session_dates.add(session_date)
 
-                stop_price = close + stop_atr_mult * daily_atr
+                stop_price = short_trigger + stop_atr_mult * daily_atr
                 df.at[idx, "plot_atr_stop"] = stop_price
 
         return df
@@ -237,9 +279,14 @@ def _initialise_signal_columns(df: pd.DataFrame) -> None:
     df["open_short"] = False
     df["close_short"] = False
 
+    # Optional intrabar execution price columns.
+    df["open_long_price"] = np.nan
+    df["close_long_price"] = np.nan
+    df["open_short_price"] = np.nan
+    df["close_short_price"] = np.nan
+
     df["entry_reason"] = ""
     df["exit_reason"] = ""
-
     df["session_type"] = ""
 
     # Debug / analysis columns.
@@ -250,6 +297,8 @@ def _initialise_signal_columns(df: pd.DataFrame) -> None:
     # Plot columns.
     df["plot_prev_close"] = np.nan
     df["plot_gap_target"] = np.nan
+    df["plot_long_trigger"] = np.nan
+    df["plot_short_trigger"] = np.nan
     df["plot_atr_stop"] = np.nan
 
 
@@ -288,7 +337,6 @@ def _attach_daily_context(intraday: pd.DataFrame, daily_context: pd.DataFrame) -
     out["session_date"] = out["date"].dt.normalize()
 
     context = daily_context.dropna(subset=["session_date"]).sort_values("session_date", kind="stable").copy()
-
     out = out.merge(context, on="session_date", how="left")
 
     missing = out["prev_daily_close"].isna()
@@ -326,6 +374,14 @@ def _session_type(timestamp: pd.Timestamp) -> str:
     if pd.Timestamp("16:00").time() <= t < pd.Timestamp("20:00").time():
         return "afterhours"
     return "closed"
+
+
+def _bar_contains_price(low: float, high: float, price: float) -> bool:
+    if not all(np.isfinite(value) for value in [low, high, price]):
+        return False
+    lower = min(low, high)
+    upper = max(low, high)
+    return lower <= price <= upper
 
 
 def _to_float(value) -> float:
