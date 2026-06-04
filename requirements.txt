@@ -1,7 +1,9 @@
 streamlit==1.55.0
 openbb==4.7.1
+yfinance==0.2.65
 pandas==2.3.3
+numpy==2.3.2
 plotly==6.6.0
+SQLAlchemy==2.0.42
 PyYAML==6.0.3
-streamlit-lightweight-charts==0.7.20
-streamlit-hotkeys==0.6.0
+pytest==8.4.1
