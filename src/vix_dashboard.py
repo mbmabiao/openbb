@@ -4,13 +4,11 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 
 from data.market_data import clean_price_history_frame
 from data.vix_futures import (
-    DEFAULT_VIX_FUTURES_CONTRACTS_CSV,
     VIX_FUTURES_UNAVAILABLE_MESSAGE,
     calculate_vx_term_structure,
     load_vix_futures_contracts,
@@ -20,7 +18,6 @@ from data.vix_futures import (
 
 PRICE_HISTORY_DAYS = 220
 PRICE_CACHE_SECONDS = 15 * 60
-RATIO_FLAT_BAND = 0.01
 
 
 @dataclass(frozen=True)
@@ -38,7 +35,6 @@ class VxContract:
     symbol: str
     expiry: str
     price: float | None
-    data: pd.DataFrame
     source: str
     warning: str | None = None
 
@@ -58,129 +54,296 @@ class VxTermStructure:
 def render_vix_dashboard() -> None:
     st.markdown(_vix_css(), unsafe_allow_html=True)
     st.markdown("## VIX / UVIX Monitor")
-    _render_manual_import_controls()
+    st.markdown(
+        "<div class='vix-subtitle'>UVIX Structure &amp; Volatility Risk Snapshot</div>",
+        unsafe_allow_html=True,
+    )
 
     today = date.today()
     start_date = today - timedelta(days=PRICE_HISTORY_DAYS)
     end_date = today + timedelta(days=1)
     vix = _load_symbol_history_cached("^VIX", "VIX Spot", start_date.isoformat(), end_date.isoformat())
     uvix = _load_symbol_history_cached("UVIX", "UVIX", start_date.isoformat(), end_date.isoformat())
-    spy = _load_symbol_history_cached("SPY", "SPY", start_date.isoformat(), end_date.isoformat())
     ten_year = _load_symbol_history_cached("^TNX", "10Y Treasury Yield", start_date.isoformat(), end_date.isoformat())
     ten_year = _as_treasury_yield(ten_year)
     term_structure = _load_vx_term_structure_cached(today.isoformat())
     vx1 = term_structure.vx1
     vx2 = term_structure.vx2
-    ratio_df = term_structure.ratio_df
+    ratio = _last_value(term_structure.ratio_df, "ratio")
 
-    _render_vix_futures_warning(term_structure)
-    _render_top_summary(
+    _render_market_snapshot_cards(
         vix=vix,
         uvix=uvix,
         ten_year=ten_year,
         vx1=vx1,
         vx2=vx2,
-        term_structure=term_structure,
-        ratio_df=ratio_df,
-        spy=spy,
-        today=today,
+        ratio=ratio,
     )
-    _render_data_warnings([vix, uvix, ten_year, spy, vx1, vx2])
+    _render_structure_signal_panel(term_structure, vx1, vx2)
 
     st.plotly_chart(
-        _build_candlestick_chart(vix.data, "VIX spot", y_title="VIX"),
+        _build_candlestick_chart(vix.data, "VIX Spot", y_title="VIX"),
+        use_container_width=True,
+    )
+    st.plotly_chart(
+        _build_candlestick_chart(uvix.data, "UVIX", y_title="UVIX"),
+        use_container_width=True,
+    )
+    st.plotly_chart(
+        _build_line_or_candle_chart(ten_year.data, "10Y Treasury Yield", y_title="Yield %"),
         use_container_width=True,
     )
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.plotly_chart(
-            _build_candlestick_chart(vx1.data, _vx_chart_title(vx1), y_title="VX1"),
-            use_container_width=True,
-        )
-    with col2:
-        st.plotly_chart(
-            _build_candlestick_chart(vx2.data, _vx_chart_title(vx2), y_title="VX2"),
-            use_container_width=True,
-        )
 
-    st.plotly_chart(_build_ratio_chart(ratio_df), use_container_width=True)
-
-    col3, col4 = st.columns(2)
-    with col3:
-        st.plotly_chart(
-            _build_candlestick_chart(uvix.data, "UVIX price", y_title="UVIX"),
-            use_container_width=True,
-        )
-    with col4:
-        st.plotly_chart(
-            _build_line_or_candle_chart(ten_year.data, "10-year Treasury yield", y_title="Yield %"),
-            use_container_width=True,
-        )
-
-
-def _render_top_summary(
+def _render_market_snapshot_cards(
     *,
     vix: PriceSeries,
     uvix: PriceSeries,
     ten_year: PriceSeries,
     vx1: VxContract,
     vx2: VxContract,
-    term_structure: VxTermStructure,
-    ratio_df: pd.DataFrame,
-    spy: PriceSeries,
-    today: date,
+    ratio: float | None,
 ) -> None:
-    ratio_value = _last_value(ratio_df, "ratio")
-    status = term_structure.status
-    regime_summary = _build_regime_summary(term_structure_status=status)
+    vix_value = _last_value(vix.data, "close")
+    uvix_value = _last_value(uvix.data, "close")
+    yield_value = _last_value(ten_year.data, "close")
 
-    metrics = [
-        ("Current VIX", _format_number(_last_value(vix.data, "close")), vix.source),
-        ("Current VX1", _format_vx_metric(vx1), _format_vx_caption(vx1)),
-        ("Current VX2", _format_vx_metric(vx2), _format_vx_caption(vx2)),
-        ("VX1 / VX2 ratio", _format_number(ratio_value, 3), _format_term_structure_caption(term_structure)),
-        ("UVIX price", _format_number(_last_value(uvix.data, "close")), uvix.source),
-        ("10Y yield", _format_pct_value(_last_value(ten_year.data, "close")), ten_year.source),
+    cards = [
+        ("VIX Spot", _format_number(vix_value), _classify_vix_level(vix_value)),
+        ("VX1 Front Month", _format_vx_metric(vx1), _format_vx_caption(vx1)),
+        ("VX2 Second Month", _format_vx_metric(vx2), _format_vx_caption(vx2)),
+        ("VX1 / VX2", _format_number(ratio, 3), _classify_term_structure_label(ratio)),
+        ("UVIX", _format_number(uvix_value), "2x short-term VIX futures"),
+        ("10Y Yield", _format_pct_value(yield_value), _classify_yield_pressure(ten_year.data)),
     ]
 
     st.markdown('<div class="vix-summary-grid">', unsafe_allow_html=True)
-    for row_start in range(0, len(metrics), 4):
-        columns = st.columns(4)
-        for column, (label, value, caption) in zip(columns, metrics[row_start : row_start + 4], strict=False):
+    for row_start in range(0, len(cards), 3):
+        columns = st.columns(3)
+        for column, (label, value, caption) in zip(columns, cards[row_start : row_start + 3], strict=False):
             with column:
                 st.metric(label, value, caption)
     st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='regime-summary'><b>Regime summary</b><br>{regime_summary}</div>", unsafe_allow_html=True)
 
 
-def _render_manual_import_controls() -> None:
-    with st.expander("Manual CSV import", expanded=False):
-        st.caption("VIX futures schema: symbol,expiry,last,open,high,low,close,source,timestamp")
-        futures_upload = st.file_uploader(
-            "Import vix_futures_contracts.csv",
-            type=["csv"],
-            key="vix_futures_upload",
+def _render_structure_signal_panel(term_structure: VxTermStructure, vx1: VxContract, vx2: VxContract) -> None:
+    st.markdown("### UVIX Structure Signal")
+    ratio = _last_value(term_structure.ratio_df, "ratio")
+    if ratio is None or vx1.price is None or vx2.price is None:
+        st.markdown(
+            "<div class='signal-panel'><div class='signal-title tone-caution'>"
+            "Term structure unavailable</div><div class='signal-explain'>"
+            "<div class='en'>VIX futures term structure is currently unavailable.</div>"
+            "<div class='zh'>当前 VIX 期货期限结构暂不可用。</div></div></div>",
+            unsafe_allow_html=True,
         )
-        if futures_upload is not None and st.button("Save vix_futures_contracts.csv"):
-            DEFAULT_VIX_FUTURES_CONTRACTS_CSV.write_bytes(futures_upload.getvalue())
-            st.cache_data.clear()
-            st.success(f"Saved {DEFAULT_VIX_FUTURES_CONTRACTS_CSV}")
-
-
-def _render_vix_futures_warning(term_structure: VxTermStructure) -> None:
-    if term_structure.warning:
-        st.warning(term_structure.warning)
-    st.caption(f"VIX futures term structure source: {term_structure.source}")
-
-
-def _render_data_warnings(items: list[PriceSeries | VxContract]) -> None:
-    warnings = [item.warning for item in items if item.warning]
-    if not warnings:
         return
-    with st.expander("Data warnings", expanded=False):
-        for warning in warnings:
-            st.warning(warning)
+
+    title = _build_structure_signal_title(ratio)
+    tone = _signal_tone_class(ratio)
+    explain_en, explain_zh = _build_structure_explanation(term_structure, vx1, vx2)
+    summary = _build_roll_pressure_summary(term_structure, vx1, vx2)
+    interpretation = _build_trading_interpretation(ratio)
+
+    roll_cards = "".join(
+        f"<div class='roll-card'><div class='roll-label'>{label}</div>"
+        f"<div class='roll-value'>{value}</div></div>"
+        for label, value in summary.items()
+    )
+    trade_rows = "".join(
+        f"<div class='trade-row'><div class='trade-en'>{en}</div>"
+        f"<div class='trade-zh'>{zh}</div></div>"
+        for en, zh in interpretation
+    )
+
+    st.markdown(
+        f"""
+        <div class='signal-panel'>
+            <div class='signal-title {tone}'>{title}</div>
+            <div class='signal-explain'>
+                <div class='en'>{explain_en}</div>
+                <div class='zh'>{explain_zh}</div>
+            </div>
+            <div class='rollgrid'>{roll_cards}</div>
+            <div class='trade-block'>
+                <div class='trade-head'>Trading Interpretation · 交易解读</div>
+                {trade_rows}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _classify_vix_level(vix_value: float | None) -> str:
+    if vix_value is None:
+        return "Unavailable"
+    if vix_value < 15:
+        return "Low volatility"
+    if vix_value < 20:
+        return "Mildly elevated"
+    if vix_value < 30:
+        return "Elevated risk"
+    return "Stress / panic"
+
+
+def _classify_term_structure_label(ratio: float | None) -> str:
+    if ratio is None:
+        return "Unavailable"
+    if ratio < 0.95:
+        return "Strong Contango"
+    if ratio < 0.99:
+        return "Contango"
+    if ratio <= 1.01:
+        return "Flat"
+    return "Backwardation"
+
+
+def _classify_yield_pressure(ten_year_df: pd.DataFrame) -> str:
+    if ten_year_df is None or ten_year_df.empty or "close" not in ten_year_df.columns:
+        return "Rates stable"
+    closes = pd.to_numeric(ten_year_df["close"], errors="coerce").dropna()
+    if len(closes) < 6:
+        return "Rates stable"
+    latest = float(closes.iloc[-1])
+    prior = float(closes.iloc[-6])
+    if latest > prior:
+        return "Rates pressure rising"
+    if latest < prior:
+        return "Rates pressure easing"
+    return "Rates stable"
+
+
+def _build_structure_signal_title(ratio: float | None) -> str:
+    if ratio is None:
+        return "Term structure unavailable"
+    if ratio < 0.95:
+        return "Strong Contango: UVIX structure is unfavourable"
+    if ratio < 0.99:
+        return "Contango: UVIX has negative roll pressure"
+    if ratio <= 1.01:
+        return "Flat Curve: volatility risk is rising"
+    return "Backwardation: front-end volatility stress is priced in"
+
+
+def _signal_tone_class(ratio: float | None) -> str:
+    if ratio is None:
+        return "tone-caution"
+    if ratio < 0.95:
+        return "tone-bad"
+    if ratio < 0.99:
+        return "tone-warn"
+    if ratio <= 1.01:
+        return "tone-caution"
+    return "tone-good"
+
+
+def _build_structure_explanation(
+    term_structure: VxTermStructure, vx1: VxContract, vx2: VxContract
+) -> tuple[str, str]:
+    ratio = _last_value(term_structure.ratio_df, "ratio")
+    if ratio is None or vx1.price is None or vx2.price is None:
+        return (
+            "VIX futures term structure is currently unavailable.",
+            "当前 VIX 期货期限结构暂不可用。",
+        )
+    contango_pct = term_structure.contango_pct if term_structure.contango_pct is not None else 0.0
+    backwardation_pct = (
+        term_structure.backwardation_pct if term_structure.backwardation_pct is not None else 0.0
+    )
+    if 0.99 <= ratio <= 1.01:
+        return (
+            "VX1 and VX2 are close to flat. The market may be transitioning from "
+            "calm contango toward higher near-term volatility risk.",
+            "近月和次月 VIX 期货接近平坦，说明市场可能正在从平静结构转向更高的短期波动风险。",
+        )
+    if ratio < 0.99:
+        return (
+            f"VX1 is {contango_pct:.2f}% cheaper than VX2. This means the VIX futures "
+            "curve is in contango. UVIX faces negative roll pressure unless volatility "
+            "expands quickly.",
+            f"近月 VIX 期货比次月便宜约 {contango_pct:.2f}%，说明曲线处于 Contango。"
+            "UVIX 会受到负展期压力，除非波动率快速扩张。",
+        )
+    return (
+        f"VX1 is {backwardation_pct:.2f}% more expensive than VX2. This means the front "
+        "end of the VIX futures curve is stressed. UVIX has a more favourable short-term "
+        "structure, but reversal risk is high.",
+        f"近月 VIX 期货比次月贵约 {backwardation_pct:.2f}%，说明短端波动率压力较高。"
+        "UVIX 短期结构更友好，但恐慌回落风险也更高。",
+    )
+
+
+def _build_roll_pressure_summary(
+    term_structure: VxTermStructure, vx1: VxContract, vx2: VxContract
+) -> dict[str, str]:
+    ratio = _last_value(term_structure.ratio_df, "ratio")
+    contango = _format_number(term_structure.contango_pct, 2)
+    backwardation = _format_number(term_structure.backwardation_pct, 2)
+    if ratio is None:
+        roll_pressure = "Neutral"
+        structure = "Unavailable"
+    elif ratio < 0.95:
+        roll_pressure = "Negative"
+        structure = "Unfavourable"
+    elif ratio < 0.99:
+        roll_pressure = "Negative"
+        structure = "Mildly unfavourable"
+    elif ratio <= 1.01:
+        roll_pressure = "Neutral"
+        structure = "Neutral / watch"
+    else:
+        roll_pressure = "Positive"
+        structure = "Favourable short-term"
+    return {
+        "Contango": f"{contango}%",
+        "Backwardation": f"{backwardation}%",
+        "Roll Pressure": roll_pressure,
+        "UVIX Structure": structure,
+    }
+
+
+def _build_trading_interpretation(ratio: float | None) -> list[tuple[str, str]]:
+    if ratio is None:
+        return []
+    if ratio < 0.95:
+        return [
+            (
+                "Intraday spike trade: possible only if VIX/VX1 expands quickly.",
+                "日内冲击交易：只有 VIX / VX1 快速扩张时才有优势。",
+            ),
+            ("Overnight hold: structurally unfavourable.", "隔夜持有：结构不友好。"),
+            (
+                "Multi-day hold: high decay risk unless the curve flattens.",
+                "多日持有：除非曲线变平，否则损耗风险高。",
+            ),
+        ]
+    if ratio < 0.99:
+        return [
+            ("Intraday spike trade: possible.", "日内交易：可以，但需要波动率继续扩张。"),
+            ("Overnight hold: still has roll-cost drag.", "隔夜持有：仍有展期拖累。"),
+            (
+                "Multi-day hold: requires curve flattening or rising VIX.",
+                "多日持有：需要曲线变平或 VIX 继续上升。",
+            ),
+        ]
+    if ratio <= 1.01:
+        return [
+            ("Intraday trade: volatility risk is active.", "日内交易：波动率风险已经活跃。"),
+            ("Overnight hold: less roll drag than contango.", "隔夜持有：展期拖累比 Contango 小。"),
+            (
+                "Multi-day hold: watch for backwardation or IV crush.",
+                "多日持有：关注是否进入 Backwardation 或事件后 IV crush。",
+            ),
+        ]
+    return [
+        ("Intraday trade: structure supports UVIX.", "日内交易：结构支持 UVIX。"),
+        (
+            "Overnight hold: more favourable but reversal risk is high.",
+            "隔夜持有：结构更友好，但反转风险高。",
+        ),
+        ("Multi-day hold: only if stress continues.", "多日持有：只有风险压力持续时才适合。"),
+    ]
 
 
 @st.cache_data(ttl=PRICE_CACHE_SECONDS, show_spinner=False)
@@ -333,32 +496,6 @@ def _build_line_or_candle_chart(df: pd.DataFrame, title: str, *, y_title: str):
     return fig
 
 
-def _build_ratio_chart(ratio_df: pd.DataFrame):
-    import plotly.graph_objects as go
-
-    latest_ratio = _last_value(ratio_df, "ratio")
-    status = _contango_status(latest_ratio)
-    fig = go.Figure()
-    if not ratio_df.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=ratio_df["date"],
-                y=ratio_df["ratio"],
-                mode="lines",
-                name="VX1 / VX2",
-                line={"color": "#f59e0b", "width": 2},
-            )
-        )
-    else:
-        fig.add_annotation(text="No ratio data", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
-
-    fig.add_hline(y=1 - RATIO_FLAT_BAND, line_dash="dot", line_color="rgba(148,163,184,0.6)", annotation_text="Contango")
-    fig.add_hline(y=1, line_dash="solid", line_color="rgba(255,255,255,0.45)", annotation_text="Flat")
-    fig.add_hline(y=1 + RATIO_FLAT_BAND, line_dash="dot", line_color="rgba(239,68,68,0.65)", annotation_text="Backwardation")
-    _apply_chart_layout(fig, f"VX1 / VX2 ratio - {status}", y_title="Ratio", rangeslider=False)
-    return fig
-
-
 def _apply_chart_layout(fig: Any, title: str, *, y_title: str, rangeslider: bool, height: int = 520) -> None:
     fig.update_layout(
         template="plotly_dark",
@@ -375,41 +512,15 @@ def _apply_chart_layout(fig: Any, title: str, *, y_title: str, rangeslider: bool
     )
 
 
-def _build_ratio_frame(vx1_df: pd.DataFrame, vx2_df: pd.DataFrame) -> pd.DataFrame:
-    if vx1_df.empty or vx2_df.empty or "close" not in vx1_df.columns or "close" not in vx2_df.columns:
-        return pd.DataFrame(columns=["date", "ratio"])
-    left = vx1_df[["date", "close"]].rename(columns={"close": "vx1"})
-    right = vx2_df[["date", "close"]].rename(columns={"close": "vx2"})
-    merged = left.merge(right, on="date", how="inner")
-    merged["ratio"] = merged["vx1"] / merged["vx2"].replace(0, np.nan)
-    return merged.dropna(subset=["ratio"]).sort_values("date", kind="stable").reset_index(drop=True)
-
-
 def _vx_contract_from_row(row: pd.Series, slot: str, source: str) -> VxContract:
     price = _safe_float(row.get("last"))
     if price is None:
         price = _safe_float(row.get("close"))
-    timestamp = pd.to_datetime(row.get("timestamp"), errors="coerce")
-    if pd.isna(timestamp):
-        timestamp = pd.to_datetime(row.get("expiry"), errors="coerce")
-    open_price = _safe_float(row.get("open"))
-    high_price = _safe_float(row.get("high"))
-    low_price = _safe_float(row.get("low"))
-    data = pd.DataFrame(
-        {
-            "date": [timestamp],
-            "open": [open_price if open_price is not None else price],
-            "high": [high_price if high_price is not None else price],
-            "low": [low_price if low_price is not None else price],
-            "close": [price],
-        }
-    )
     return VxContract(
         slot=slot,
         symbol=str(row.get("symbol") or slot),
         expiry=_format_expiry(row.get("expiry")),
         price=price,
-        data=data.dropna(subset=["date", "close"]),
         source=source,
     )
 
@@ -420,14 +531,9 @@ def _unavailable_vx_contract(slot: str, *, warning: str) -> VxContract:
         symbol="unavailable",
         expiry="unavailable",
         price=None,
-        data=pd.DataFrame(columns=["date", "open", "high", "low", "close"]),
         source="unavailable",
         warning=warning,
     )
-
-
-def _build_regime_summary(*, term_structure_status: str) -> str:
-    return term_structure_status
 
 
 def _as_treasury_yield(series: PriceSeries) -> PriceSeries:
@@ -499,22 +605,6 @@ def _has_ohlc(df: pd.DataFrame) -> bool:
     return not df.empty and {"date", "open", "high", "low", "close"}.issubset(df.columns)
 
 
-def _contango_status(ratio: float | None) -> str:
-    if ratio is None or pd.isna(ratio):
-        return "Term structure unavailable"
-    if ratio < 1 - RATIO_FLAT_BAND:
-        return "Contango"
-    if ratio > 1 + RATIO_FLAT_BAND:
-        return "Backwardation"
-    return "Flat"
-
-
-def _vx_chart_title(contract: VxContract) -> str:
-    if contract.symbol == "unavailable":
-        return f"{contract.slot} unavailable"
-    return f"{contract.slot} {contract.symbol} - expiry {contract.expiry}"
-
-
 def _format_expiry(value: Any) -> str:
     ts = pd.to_datetime(value, errors="coerce")
     if pd.isna(ts):
@@ -543,26 +633,13 @@ def _safe_float(value: Any) -> float | None:
 def _format_vx_metric(contract: VxContract) -> str:
     if contract.symbol == "unavailable":
         return "unavailable"
-    price = contract.price if contract.price is not None else _last_value(contract.data, "close")
-    return f"{contract.symbol} {_format_number(price)}"
+    return f"{contract.symbol} {_format_number(contract.price)}"
 
 
 def _format_vx_caption(contract: VxContract) -> str:
     if contract.symbol == "unavailable":
         return "no contract-level data"
     return f"Expiry: {contract.expiry}"
-
-
-def _format_term_structure_caption(term_structure: VxTermStructure) -> str:
-    if term_structure.status == "Term structure unavailable":
-        return term_structure.status
-    contango = _format_number(term_structure.contango_pct, 2)
-    backwardation = _format_number(term_structure.backwardation_pct, 2)
-    return (
-        f"{term_structure.status} | "
-        f"contango {contango}% | "
-        f"backwardation {backwardation}%"
-    )
 
 
 def _format_number(value: float | None, decimals: int = 2) -> str:
@@ -580,17 +657,90 @@ def _format_pct_value(value: float | None) -> str:
 def _vix_css() -> str:
     return """
     <style>
+    .vix-subtitle {
+        color: #9fb3c8;
+        font-size: 0.95rem;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+        margin: -0.2rem 0 1.1rem 0;
+    }
     .vix-summary-grid [data-testid="stMetric"] {
         min-height: 118px;
     }
-    .regime-summary {
+    .signal-panel {
         border: 1px solid rgba(148, 163, 184, 0.22);
-        background: rgba(13, 20, 32, 0.78);
+        background: rgba(13, 20, 32, 0.82);
+        border-radius: 12px;
+        padding: 1.1rem 1.25rem;
+        margin: 0.4rem 0 1.4rem 0;
+    }
+    .signal-title {
+        font-size: 1.12rem;
+        font-weight: 800;
+        line-height: 1.35;
+        padding-left: 0.7rem;
+        border-left: 4px solid #5aa7ff;
+        margin-bottom: 0.8rem;
+    }
+    .signal-title.tone-bad { color: #ff6b6b; border-left-color: #ef4444; }
+    .signal-title.tone-warn { color: #fbbf24; border-left-color: #f59e0b; }
+    .signal-title.tone-caution { color: #5aa7ff; border-left-color: #5aa7ff; }
+    .signal-title.tone-good { color: #38d5b5; border-left-color: #38d5b5; }
+    .signal-explain { margin-bottom: 1rem; }
+    .signal-explain .en { color: #e5edf6; line-height: 1.55; }
+    .signal-explain .zh {
+        color: #9fb3c8;
+        line-height: 1.6;
+        font-size: 0.92rem;
+        margin-top: 0.3rem;
+    }
+    .rollgrid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 0.6rem;
+        margin-bottom: 1.1rem;
+    }
+    .roll-card {
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        background: rgba(5, 7, 13, 0.55);
         border-radius: 8px;
-        padding: 0.9rem 1rem;
-        margin: 0.3rem 0 1rem 0;
-        color: #e5edf6;
-        line-height: 1.55;
+        padding: 0.6rem 0.7rem;
+    }
+    .roll-label {
+        color: #9fb3c8;
+        font-size: 0.74rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+    }
+    .roll-value {
+        color: #ffffff;
+        font-size: 1.05rem;
+        font-weight: 800;
+        margin-top: 0.25rem;
+    }
+    .trade-block {
+        border-top: 1px solid rgba(148, 163, 184, 0.16);
+        padding-top: 0.85rem;
+    }
+    .trade-head {
+        color: #d7e2ee;
+        font-weight: 800;
+        font-size: 0.9rem;
+        letter-spacing: 0.3px;
+        margin-bottom: 0.55rem;
+    }
+    .trade-row {
+        display: flex;
+        flex-direction: column;
+        padding: 0.4rem 0;
+        border-bottom: 1px dashed rgba(148, 163, 184, 0.12);
+    }
+    .trade-row:last-child { border-bottom: 0; }
+    .trade-en { color: #e5edf6; font-weight: 600; }
+    .trade-zh { color: #9fb3c8; font-size: 0.88rem; margin-top: 0.15rem; }
+    @media (max-width: 900px) {
+        .rollgrid { grid-template-columns: repeat(2, 1fr); }
     }
     </style>
     """
