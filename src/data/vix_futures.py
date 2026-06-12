@@ -256,6 +256,120 @@ def calculate_vx_term_structure(vx1: pd.Series | dict[str, Any] | None, vx2: pd.
     }
 
 
+def fetch_current_vx_contract_daily_history(
+    symbol: str,
+    start_date: date,
+    end_date: date,
+) -> pd.DataFrame:
+    """Best-effort daily close history for a single VX futures contract.
+
+    Returns a ``DataFrame`` with ``date`` and ``close`` columns, sorted ascending.
+    When no per-contract history source is reachable, an empty frame is returned so
+    callers can fall back to a single live snapshot.
+    """
+    expiry = _infer_expiry_from_symbol(symbol)
+    history = _fetch_vx_contract_history_openbb(symbol, expiry, start_date, end_date)
+    if history is not None and not history.empty:
+        return history
+    return pd.DataFrame(columns=["date", "close"])
+
+
+def _fetch_vx_contract_history_openbb(
+    symbol: str,
+    expiry: pd.Timestamp | Any,
+    start_date: date,
+    end_date: date,
+) -> pd.DataFrame:
+    try:
+        from openbb import obb
+    except Exception:
+        return pd.DataFrame(columns=["date", "close"])
+
+    attempts: list[dict[str, Any]] = []
+    if expiry is not None and not pd.isna(expiry):
+        expiration = pd.Timestamp(expiry).strftime("%Y-%m")
+        attempts.append({"symbol": "VX", "expiration": expiration})
+    attempts.append({"symbol": symbol})
+
+    for kwargs in attempts:
+        for provider in ("yfinance",):
+            try:
+                result = obb.derivatives.futures.historical(
+                    start_date=start_date.isoformat(),
+                    end_date=end_date.isoformat(),
+                    provider=provider,
+                    **kwargs,
+                )
+                cleaned = _to_contract_daily_close(_result_to_frame(result))
+                if not cleaned.empty:
+                    return cleaned
+            except Exception:
+                continue
+    return pd.DataFrame(columns=["date", "close"])
+
+
+def _result_to_frame(result: Any) -> pd.DataFrame | None:
+    if result is None:
+        return None
+    if hasattr(result, "to_dataframe"):
+        return result.to_dataframe()
+    if hasattr(result, "to_df"):
+        return result.to_df()
+    if hasattr(result, "results"):
+        rows = getattr(result, "results")
+        records = []
+        try:
+            iterable = rows if isinstance(rows, list) else list(rows)
+        except TypeError:
+            iterable = [rows]
+        for item in iterable:
+            if hasattr(item, "model_dump"):
+                records.append(item.model_dump())
+            elif hasattr(item, "dict"):
+                records.append(item.dict())
+            else:
+                records.append(item)
+        return pd.DataFrame(records)
+    if isinstance(result, pd.DataFrame):
+        return result
+    try:
+        return pd.DataFrame(result)
+    except Exception:
+        return None
+
+
+def _to_contract_daily_close(df: pd.DataFrame | None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["date", "close"])
+
+    frame = df.copy()
+    if isinstance(frame.index, pd.DatetimeIndex):
+        frame = frame.reset_index()
+    frame = _flatten_columns(frame)
+    lower_to_column = {str(column).strip().lower(): column for column in frame.columns}
+
+    date_col = _first_column(lower_to_column, ("date", "datetime", "time", "timestamp", "index"))
+    close_col = _first_column(
+        lower_to_column,
+        ("close", "settle", "settlement", "settlement_price", "last", "price", "adj close", "adj_close"),
+    )
+    if date_col is None or close_col is None:
+        return pd.DataFrame(columns=["date", "close"])
+
+    out = pd.DataFrame(
+        {
+            "date": pd.to_datetime(frame[date_col], errors="coerce").dt.normalize(),
+            "close": pd.to_numeric(frame[close_col], errors="coerce"),
+        }
+    )
+    out = out.dropna(subset=["date", "close"])
+    out = out.loc[out["close"] > 0]
+    if out.empty:
+        return pd.DataFrame(columns=["date", "close"])
+    out = out.sort_values("date", kind="stable").drop_duplicates("date", keep="last")
+    return out.reset_index(drop=True)
+
+
 def empty_vix_futures_contracts_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=VIX_FUTURES_COLUMNS)
 

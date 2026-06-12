@@ -11,6 +11,7 @@ from data.market_data import clean_price_history_frame
 from data.vix_futures import (
     VIX_FUTURES_UNAVAILABLE_MESSAGE,
     calculate_vx_term_structure,
+    fetch_current_vx_contract_daily_history,
     load_vix_futures_contracts,
     select_vx1_vx2,
 )
@@ -388,13 +389,16 @@ def _update_and_load_vx_ratio_history(
                 "status": term_structure.status,
             }
         )
+        lookback_start = today - timedelta(days=PAIR_LOOKBACK_DAYS)
+        vx1_prices = _contract_daily_prices(vx1.symbol, vx1.price, lookback_start, today)
+        vx2_prices = _contract_daily_prices(vx2.symbol, vx2.price, lookback_start, today)
         pair_rows = build_contract_pair_daily_rows(
             vx1_symbol=vx1.symbol,
             vx1_expiry=vx1.expiry,
             vx2_symbol=vx2.symbol,
             vx2_expiry=vx2.expiry,
-            vx1_prices=pd.DataFrame({"date": [today], "close": [vx1.price]}),
-            vx2_prices=pd.DataFrame({"date": [today], "close": [vx2.price]}),
+            vx1_prices=vx1_prices,
+            vx2_prices=vx2_prices,
         )
         write_contract_pair_daily(pair_rows)
 
@@ -408,6 +412,14 @@ def _update_and_load_vx_ratio_history(
     if len(observed_df) >= 2:
         return "observed", observed_df
     return None, observed_df
+
+
+def _contract_daily_prices(symbol: str, price: float, start_date: date, today: date) -> pd.DataFrame:
+    """Real daily close history for a VX contract, falling back to today's live price."""
+    history = fetch_current_vx_contract_daily_history(symbol, start_date, today)
+    if history is not None and not history.empty:
+        return history
+    return pd.DataFrame({"date": [today], "close": [price]})
 
 
 def _render_vx_ratio_history(kind: str | None, history_df: pd.DataFrame) -> None:
