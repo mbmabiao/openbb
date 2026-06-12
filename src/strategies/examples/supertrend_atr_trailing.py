@@ -13,9 +13,9 @@ class SuperTrendATRTrailingStrategy(BaseStrategy):
     required_timeframes = ["1d"]
 
     default_config = {
-        "atr_period": 10,
+        "atr_period": 15,
         "supertrend_multiplier": 3.0,
-        "atr_exit_mult": 1.5,
+        "atr_exit_mult": 2.0,
         "exit_on_opposite_signal": True,
         "direction": "both",
     }

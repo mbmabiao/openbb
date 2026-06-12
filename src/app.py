@@ -19,6 +19,7 @@ from market_dashboard import render_market_dashboard
 from ui.panels import show_dataframe_result, show_news
 from ui.sidebar import render_sidebar
 from ui.strategy_backtest_page import render_strategy_backtest_page
+from vix_dashboard import render_vix_dashboard
 
 
 def _app_shell_css() -> str:
@@ -268,13 +269,17 @@ st.markdown(f'<div class="app-brand">{APP_TITLE} <span>v1</span></div>', unsafe_
 
 top_page = st.radio(
     "Top navigation",
-    ("Stock", "Backtest", "Market"),
+    ("Stock", "Backtest", "Market", "VIX"),
     horizontal=True,
     label_visibility="collapsed",
 )
 
 if top_page == "Market":
     render_market_dashboard()
+    st.stop()
+
+if top_page == "VIX":
+    render_vix_dashboard()
     st.stop()
 
 controls = render_sidebar()
