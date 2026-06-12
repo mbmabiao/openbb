@@ -14,6 +14,12 @@ from data.vix_futures import (
     load_vix_futures_contracts,
     select_vx1_vx2,
 )
+from data.vx_ratio_history import (
+    has_vx_ratio_snapshot,
+    make_snapshot_timestamp,
+    read_vx_ratio_history,
+    write_vx_ratio_snapshot,
+)
 
 
 PRICE_HISTORY_DAYS = 220
@@ -80,6 +86,9 @@ def render_vix_dashboard() -> None:
         ratio=ratio,
     )
     _render_structure_signal_panel(term_structure, vx1, vx2)
+
+    history_df = _load_vx_ratio_history(term_structure, today)
+    _render_observed_vx_ratio_history(history_df)
 
     st.plotly_chart(
         _build_candlestick_chart(vix.data, "VIX Spot", y_title="VIX"),
@@ -344,6 +353,93 @@ def _build_trading_interpretation(ratio: float | None) -> list[tuple[str, str]]:
         ),
         ("Multi-day hold: only if stress continues.", "多日持有：只有风险压力持续时才适合。"),
     ]
+
+
+def _load_vx_ratio_history(term_structure: VxTermStructure, today: date) -> pd.DataFrame:
+    """Record today's observed VX1/VX2 ratio (once) then return the full recorded history."""
+    ratio = _last_value(term_structure.ratio_df, "ratio")
+    vx1 = term_structure.vx1
+    vx2 = term_structure.vx2
+    has_observable_ratio = ratio is not None and vx1.price is not None and vx2.price is not None
+
+    if has_observable_ratio and not has_vx_ratio_snapshot(today):
+        write_vx_ratio_snapshot(
+            {
+                "date": today.isoformat(),
+                "timestamp": make_snapshot_timestamp(),
+                "vx1_symbol": vx1.symbol,
+                "vx1_expiry": vx1.expiry,
+                "vx1_price": vx1.price,
+                "vx2_symbol": vx2.symbol,
+                "vx2_expiry": vx2.expiry,
+                "vx2_price": vx2.price,
+                "ratio": ratio,
+                "contango_pct": term_structure.contango_pct,
+                "backwardation_pct": term_structure.backwardation_pct,
+                "status": term_structure.status,
+            }
+        )
+
+    return read_vx_ratio_history()
+
+
+def _render_observed_vx_ratio_history(history_df: pd.DataFrame) -> None:
+    st.markdown("### Observed VX1 / VX2 Ratio History")
+    if len(history_df) >= 2:
+        st.plotly_chart(
+            _build_observed_vx_ratio_history_line_chart(history_df),
+            use_container_width=True,
+        )
+    else:
+        st.info(
+            "Not enough observed VX1/VX2 ratio history yet. "
+            "The dashboard will start building this line chart automatically."
+        )
+    st.caption("该线图只包含本 dashboard 已记录到的 VX1/VX2 快照。缺失日期不会自动回填。")
+
+
+def _build_observed_vx_ratio_history_line_chart(history_df: pd.DataFrame):
+    import plotly.graph_objects as go
+
+    customdata = history_df[["vx1_symbol", "vx1_price", "vx2_symbol", "vx2_price", "status"]].to_numpy()
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=history_df["date"],
+            y=history_df["ratio"],
+            mode="lines+markers",
+            name="VX1 / VX2",
+            line={"color": "#f59e0b", "width": 2},
+            marker={"size": 7, "color": "#f59e0b", "line": {"color": "rgba(255,255,255,0.75)", "width": 1}},
+            customdata=customdata,
+            hovertemplate=(
+                "Date: %{x|%Y-%m-%d}<br>"
+                "Ratio: %{y:.3f}<br>"
+                "VX1: %{customdata[0]} %{customdata[1]:.2f}<br>"
+                "VX2: %{customdata[2]} %{customdata[3]:.2f}<br>"
+                "Status: %{customdata[4]}<extra></extra>"
+            ),
+        )
+    )
+
+    reference_lines = [
+        (0.95, "Strong Contango", "rgba(148,163,184,0.6)"),
+        (0.99, "Contango / Flat", "rgba(148,163,184,0.6)"),
+        (1.00, "Flat", "rgba(255,255,255,0.45)"),
+        (1.01, "Backwardation", "rgba(239,68,68,0.65)"),
+    ]
+    for level, label, color in reference_lines:
+        fig.add_hline(
+            y=level,
+            line_dash="solid" if level == 1.00 else "dot",
+            line_color=color,
+            annotation_text=label,
+            annotation_position="right",
+        )
+
+    _apply_chart_layout(fig, "Observed VX1 / VX2 Ratio History", y_title="VX1 / VX2 Ratio", rangeslider=False)
+    fig.update_xaxes(title="Date")
+    return fig
 
 
 @st.cache_data(ttl=PRICE_CACHE_SECONDS, show_spinner=False)
