@@ -15,10 +15,14 @@ from data.vix_futures import (
     select_vx1_vx2,
 )
 from data.vx_ratio_history import (
-    has_vx_ratio_snapshot,
+    OBSERVED_LOOKBACK_DAYS,
+    PAIR_LOOKBACK_DAYS,
+    build_contract_pair_daily_rows,
     make_snapshot_timestamp,
-    read_vx_ratio_history,
-    write_vx_ratio_snapshot,
+    read_contract_pair_daily,
+    read_observed_daily,
+    write_contract_pair_daily,
+    write_observed_daily,
 )
 
 
@@ -87,8 +91,8 @@ def render_vix_dashboard() -> None:
     )
     _render_structure_signal_panel(term_structure, vx1, vx2)
 
-    history_df = _load_vx_ratio_history(term_structure, today)
-    _render_observed_vx_ratio_history(history_df)
+    kind, history_df = _update_and_load_vx_ratio_history(term_structure, today)
+    _render_vx_ratio_history(kind, history_df)
 
     st.plotly_chart(
         _build_candlestick_chart(vix.data, "VIX Spot", y_title="VIX"),
@@ -355,15 +359,20 @@ def _build_trading_interpretation(ratio: float | None) -> list[tuple[str, str]]:
     ]
 
 
-def _load_vx_ratio_history(term_structure: VxTermStructure, today: date) -> pd.DataFrame:
-    """Record today's observed VX1/VX2 ratio (once) then return the full recorded history."""
+def _update_and_load_vx_ratio_history(
+    term_structure: VxTermStructure, today: date
+) -> tuple[str | None, pd.DataFrame]:
+    """Record today's observed VX1/VX2 ratio, then return the best available history.
+
+    Prefers the current contract pair's daily history; falls back to the observed
+    rolling history. Returns ("pair" | "observed" | None, history_df).
+    """
     ratio = _last_value(term_structure.ratio_df, "ratio")
     vx1 = term_structure.vx1
     vx2 = term_structure.vx2
-    has_observable_ratio = ratio is not None and vx1.price is not None and vx2.price is not None
 
-    if has_observable_ratio and not has_vx_ratio_snapshot(today):
-        write_vx_ratio_snapshot(
+    if ratio is not None and vx1.price is not None and vx2.price is not None:
+        write_observed_daily(
             {
                 "date": today.isoformat(),
                 "timestamp": make_snapshot_timestamp(),
@@ -379,26 +388,50 @@ def _load_vx_ratio_history(term_structure: VxTermStructure, today: date) -> pd.D
                 "status": term_structure.status,
             }
         )
-
-    return read_vx_ratio_history()
-
-
-def _render_observed_vx_ratio_history(history_df: pd.DataFrame) -> None:
-    st.markdown("### Observed VX1 / VX2 Ratio History")
-    if len(history_df) >= 2:
-        st.plotly_chart(
-            _build_observed_vx_ratio_history_line_chart(history_df),
-            use_container_width=True,
+        pair_rows = build_contract_pair_daily_rows(
+            vx1_symbol=vx1.symbol,
+            vx1_expiry=vx1.expiry,
+            vx2_symbol=vx2.symbol,
+            vx2_expiry=vx2.expiry,
+            vx1_prices=pd.DataFrame({"date": [today], "close": [vx1.price]}),
+            vx2_prices=pd.DataFrame({"date": [today], "close": [vx2.price]}),
         )
+        write_contract_pair_daily(pair_rows)
+
+        pair_df = read_contract_pair_daily(
+            vx1.symbol, vx2.symbol, lookback_days=PAIR_LOOKBACK_DAYS, today=today
+        )
+        if len(pair_df) >= 2:
+            return "pair", pair_df
+
+    observed_df = read_observed_daily(lookback_days=OBSERVED_LOOKBACK_DAYS, today=today)
+    if len(observed_df) >= 2:
+        return "observed", observed_df
+    return None, observed_df
+
+
+def _render_vx_ratio_history(kind: str | None, history_df: pd.DataFrame) -> None:
+    st.markdown("### Observed VX1 / VX2 Ratio History")
+    if kind == "pair":
+        title = "Current VX1 / VX2 Contract Pair Ratio History"
+        caption = "该线图展示当前 VX1/VX2 这组具体合约 pair 的日级别 ratio history。"
+    elif kind == "observed":
+        title = "Observed Rolling VX1 / VX2 Ratio History"
+        caption = "该线图展示 dashboard 实际观察并保存的日级别 rolling VX1/VX2 ratio。"
     else:
         st.info(
-            "Not enough observed VX1/VX2 ratio history yet. "
-            "The dashboard will start building this line chart automatically."
+            "Not enough VX1/VX2 ratio history yet. "
+            "Run the dashboard again later to build this line chart."
         )
-    st.caption("该线图只包含本 dashboard 已记录到的 VX1/VX2 快照。缺失日期不会自动回填。")
+        return
+    st.plotly_chart(
+        _build_observed_vx_ratio_history_line_chart(history_df, title=title),
+        use_container_width=True,
+    )
+    st.caption(caption)
 
 
-def _build_observed_vx_ratio_history_line_chart(history_df: pd.DataFrame):
+def _build_observed_vx_ratio_history_line_chart(history_df: pd.DataFrame, *, title: str):
     import plotly.graph_objects as go
 
     customdata = history_df[["vx1_symbol", "vx1_price", "vx2_symbol", "vx2_price", "status"]].to_numpy()
@@ -437,7 +470,7 @@ def _build_observed_vx_ratio_history_line_chart(history_df: pd.DataFrame):
             annotation_position="right",
         )
 
-    _apply_chart_layout(fig, "Observed VX1 / VX2 Ratio History", y_title="VX1 / VX2 Ratio", rangeslider=False)
+    _apply_chart_layout(fig, title, y_title="VX1 / VX2 Ratio", rangeslider=False)
     fig.update_xaxes(title="Date")
     return fig
 
