@@ -123,6 +123,21 @@ def write_observed_daily(snapshot: dict[str, Any], *, db_path: Path | str = DB_P
         connection.commit()
 
 
+def write_observed_daily_bulk(rows: list[dict[str, Any]], *, db_path: Path | str = DB_PATH) -> None:
+    """Upsert many observed daily snapshots at once (keyed by date)."""
+    if not rows:
+        return
+    placeholders = ", ".join(["?"] * len(OBSERVED_COLUMNS))
+    columns = ", ".join(OBSERVED_COLUMNS)
+    payload = [[row.get(column) for column in OBSERVED_COLUMNS] for row in rows]
+    with closing(_connect(db_path)) as connection:
+        connection.executemany(
+            f"INSERT OR REPLACE INTO vx_ratio_observed_daily ({columns}) VALUES ({placeholders})",
+            payload,
+        )
+        connection.commit()
+
+
 def write_contract_pair_daily(rows: list[dict[str, Any]], *, db_path: Path | str = DB_PATH) -> None:
     """Upsert daily ratio rows for a specific VX1/VX2 contract pair (keyed by date+symbols)."""
     if not rows:
